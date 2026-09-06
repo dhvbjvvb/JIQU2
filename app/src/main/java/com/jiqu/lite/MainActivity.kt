@@ -1096,7 +1096,7 @@ private fun FloatingNavigationBar(
         modifier = modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(horizontal = 18.dp, vertical = 12.dp)
+            .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
         Surface(
             modifier = Modifier
@@ -1104,12 +1104,12 @@ private fun FloatingNavigationBar(
                 .align(Alignment.Center),
             shape = RoundedCornerShape(32.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
-            shadowElevation = 22.dp
+            shadowElevation = 14.dp
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(76.dp)
+                    .height(68.dp)
                     .onSizeChanged { barWidthPx = it.width.toFloat() }
                     .pointerInput(barWidthPx) {
                         detectDragGesturesAfterLongPress(
@@ -1133,13 +1133,13 @@ private fun FloatingNavigationBar(
                             .offset { IntOffset(indicatorPosition.roundToInt(), 0) }
                             .width(with(density) { slotWidthPx.toDp() })
                             .fillMaxHeight()
-                            .padding(4.dp)
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Surface(
                             modifier = Modifier.fillMaxSize(),
-                            shape = RoundedCornerShape(28.dp),
+                            shape = RoundedCornerShape(24.dp),
                             color = MaterialTheme.colorScheme.primaryContainer,
-                            shadowElevation = if (isDragging) 14.dp else 7.dp
+                            shadowElevation = 0.dp
                         ) {}
                     }
                 }
@@ -1149,28 +1149,42 @@ private fun FloatingNavigationBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     destinations.forEach { item ->
-                        NavigationBarItem(
-                            modifier = Modifier.weight(1f).pressScaleOnPointer(0.94f),
-                            selected = destination == item,
-                            onClick = { onDestinationChange(item) },
-                            colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor = MaterialTheme.colorScheme.primary,
-                                selectedTextColor = MaterialTheme.colorScheme.primary,
-                                indicatorColor = Color.Transparent,
-                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                            ),
-                            icon = {
-                                Icon(
-                                    when (item) {
-                                        AppDestination.Parse -> Icons.Outlined.Link
-                                        AppDestination.History -> Icons.Outlined.History
-                                        AppDestination.Settings -> Icons.Outlined.Settings
-                                    }, item.label
+                        val selected = destination == item
+                        val contentColor = if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                        val interactionSource = remember(item) { MutableInteractionSource() }
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clickable(
+                                    interactionSource = interactionSource,
+                                    indication = null,
+                                    onClick = { onDestinationChange(item) }
                                 )
-                            },
-                            label = { Text(item.label) }
-                        )
+                                .padding(vertical = 7.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = when (item) {
+                                    AppDestination.Parse -> Icons.Outlined.Link
+                                    AppDestination.History -> Icons.Outlined.History
+                                    AppDestination.Settings -> Icons.Outlined.Settings
+                                },
+                                contentDescription = item.label,
+                                tint = contentColor
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                item.label,
+                                color = contentColor,
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     }
                 }
             }
