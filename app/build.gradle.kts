@@ -18,11 +18,12 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.jiqu.lite"
+        // Keep the package id used by APP/03 so Android can treat this as an upgrade.
+        applicationId = "com.jiqu.app"
         minSdk = 31
         targetSdk = 36
-        // Android's internal version must be an integer; 202 represents 2.0.2.
-        versionCode = 202
+        // Keep this above APP/03's 1508 so the update is accepted as an upgrade.
+        versionCode = 2002
         versionName = "2.0.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
