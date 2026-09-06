@@ -28,3 +28,7 @@ R8 优化后的 APK 位于 `app/build/outputs/apk/release/`。项目需要在 `l
 ## 开源地址
 
 https://github.com/dhvbjvvb/JIQU2
+
+## 许可证
+
+本项目采用 MIT License，详见 [LICENSE](LICENSE)。
