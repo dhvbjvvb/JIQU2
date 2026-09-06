@@ -68,6 +68,7 @@ import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.SystemUpdate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.AlertDialog
@@ -420,6 +421,7 @@ private fun Modifier.pressScaleOnPointer(pressedScale: Float = 0.965f): Modifier
 class MainActivity : ComponentActivity() {
     private val parseViewModel: ParseViewModel by viewModels()
     private val downloadViewModel: DownloadViewModel by viewModels()
+    private val updateViewModel: UpdateViewModel by viewModels()
 
     private companion object {
         const val NOTIFICATION_PERMISSION_REQUEST = 4001
@@ -492,7 +494,13 @@ class MainActivity : ComponentActivity() {
                     onDownload = ::enqueueDownload,
                     onDownloadAudio = ::enqueueAudioDownload,
                     downloadUiState = downloadViewModel.uiState,
-                    onDismissDownload = downloadViewModel::dismissResult
+                    onDismissDownload = downloadViewModel::dismissResult,
+                    updateUiState = updateViewModel.uiState,
+                    onCheckForUpdate = { updateViewModel.checkForUpdate(manual = true) },
+                    onDismissUpdate = updateViewModel::dismiss,
+                    onIgnoreAutomaticUpdates = updateViewModel::ignoreAutomaticChecks,
+                    onDownloadUpdate = { updateViewModel.downloadAndInstall(this@MainActivity, it) },
+                    onContinueUpdateInstall = { updateViewModel.continuePendingInstall(this@MainActivity) }
                 )
             }
         }
@@ -500,9 +508,15 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        updateViewModel.resumePendingInstall(this)
         if (isDownloadCompletionNotificationsEnabled() && hasNotificationPermission()) {
             ensureDownloadCompletionChannel()
         }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        updateViewModel.checkForUpdate(manual = false)
     }
 
     override fun onRequestPermissionsResult(
@@ -658,7 +672,13 @@ private fun JiquApp(
     onDownload: (ParsedMedia, MediaDownloadOption) -> Unit,
     onDownloadAudio: (ParsedMedia) -> Unit,
     downloadUiState: DownloadUiState = DownloadUiState.Idle,
-    onDismissDownload: () -> Unit = {}
+    onDismissDownload: () -> Unit = {},
+    updateUiState: UpdateUiState = UpdateUiState.Hidden,
+    onCheckForUpdate: () -> Unit = {},
+    onDismissUpdate: () -> Unit = {},
+    onIgnoreAutomaticUpdates: () -> Unit = {},
+    onDownloadUpdate: (AppUpdate) -> Unit = {},
+    onContinueUpdateInstall: () -> Unit = {}
 ) {
     var destinationName by rememberSaveable { mutableStateOf(AppDestination.Parse.name) }
     val destination = AppDestination.valueOf(destinationName)
@@ -816,6 +836,8 @@ private fun JiquApp(
                         onAutoPasteParseChange = onAutoPasteParseChange,
                         onTestNotification = onTestNotification,
                         onOpenDownloadNotificationSettings = onOpenDownloadNotificationSettings,
+                        isCheckingForUpdate = updateUiState is UpdateUiState.Checking,
+                        onCheckForUpdate = onCheckForUpdate,
                         modifier = Modifier.fillMaxSize()
                     )
                 }
@@ -832,6 +854,14 @@ private fun JiquApp(
     if (downloadUiState !is DownloadUiState.Idle) {
         DownloadProgressDialog(downloadUiState, onDismissDownload)
     }
+    UpdateStatusDialog(
+        state = updateUiState,
+        onDismiss = onDismissUpdate,
+        onRetryCheck = onCheckForUpdate,
+        onIgnore = onIgnoreAutomaticUpdates,
+        onDownload = onDownloadUpdate,
+        onContinueInstall = onContinueUpdateInstall
+    )
 }
 
 @Composable
@@ -1464,6 +1494,138 @@ private fun MediaDetails(media: ParsedMedia) {
 }
 
 @Composable
+private fun UpdateStatusDialog(
+    state: UpdateUiState,
+    onDismiss: () -> Unit,
+    onRetryCheck: () -> Unit,
+    onIgnore: () -> Unit,
+    onDownload: (AppUpdate) -> Unit,
+    onContinueInstall: () -> Unit
+) {
+    if (state is UpdateUiState.Hidden) return
+    val blocksDismiss = state is UpdateUiState.Checking || state is UpdateUiState.Downloading
+    AlertDialog(
+        onDismissRequest = { if (!blocksDismiss) onDismiss() },
+        shape = RoundedCornerShape(24.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        title = {
+            Text(
+                when (state) {
+                    UpdateUiState.Checking -> "检查更新"
+                    UpdateUiState.UpToDate -> "检查更新"
+                    is UpdateUiState.Available -> "发现新版本"
+                    is UpdateUiState.Failed -> "检查更新失败"
+                    is UpdateUiState.Downloading -> "正在下载更新"
+                    is UpdateUiState.AwaitingInstallPermission -> "允许安装更新"
+                    is UpdateUiState.DownloadFailed -> "更新失败"
+                    UpdateUiState.Hidden -> ""
+                }
+            )
+        },
+        text = {
+            when (state) {
+                UpdateUiState.Checking -> {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 3.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("正在检查更新中")
+                    }
+                }
+                UpdateUiState.UpToDate -> Text("已为最新版本")
+                is UpdateUiState.Available -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(
+                            "${BuildConfig.VERSION_NAME}  →  ${state.update.versionName}",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            buildString {
+                                append("更新来源：${state.update.source.displayName}")
+                                if (state.update.assetSizeBytes > 0L) {
+                                    append("  ·  ${formatMediaSize(state.update.assetSizeBytes)}")
+                                }
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            state.update.releaseNotes,
+                            modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                is UpdateUiState.Failed -> Text(state.message)
+                is UpdateUiState.Downloading -> {
+                    val total = state.totalBytes
+                    val progress = if (total > 0L) {
+                        (state.downloadedBytes.toDouble() / total.toDouble()).coerceIn(0.0, 1.0).toFloat()
+                    } else 0f
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(state.update.assetName, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        if (total > 0L) {
+                            LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                        } else {
+                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        }
+                        Row(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                if (total > 0L) "${(progress * 100).toInt()}%" else "正在获取文件",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                if (total > 0L) {
+                                    "${formatMediaSize(state.downloadedBytes)} / ${formatMediaSize(total)}"
+                                } else {
+                                    formatMediaSize(state.downloadedBytes)
+                                },
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                is UpdateUiState.AwaitingInstallPermission -> Text(
+                    "请在系统设置中允许“即取”安装未知应用，返回后将自动打开安装程序。"
+                )
+                is UpdateUiState.DownloadFailed -> Text(state.message)
+                UpdateUiState.Hidden -> Unit
+            }
+        },
+        dismissButton = {
+            when (state) {
+                is UpdateUiState.Available -> TextButton(onClick = onIgnore) { Text("忽略") }
+                is UpdateUiState.Failed,
+                is UpdateUiState.DownloadFailed -> TextButton(onClick = onDismiss) { Text("关闭") }
+                else -> Unit
+            }
+        },
+        confirmButton = {
+            when (state) {
+                UpdateUiState.UpToDate -> Button(onClick = onDismiss) { Text("确定") }
+                is UpdateUiState.Available -> Button(onClick = { onDownload(state.update) }) {
+                    Icon(Icons.Outlined.Download, contentDescription = null)
+                    Spacer(Modifier.width(6.dp))
+                    Text("下载最新版本")
+                }
+                is UpdateUiState.Failed -> Button(onClick = onRetryCheck) { Text("重试") }
+                is UpdateUiState.AwaitingInstallPermission -> Button(onClick = onContinueInstall) {
+                    Text("前往授权")
+                }
+                is UpdateUiState.DownloadFailed -> Button(onClick = { onDownload(state.update) }) {
+                    Text("重新下载")
+                }
+                else -> Unit
+            }
+        }
+    )
+}
+
+@Composable
 private fun DownloadProgressDialog(
     state: DownloadUiState,
     onDismiss: () -> Unit
@@ -2045,6 +2207,8 @@ private fun SettingsScreen(
     onAutoPasteParseChange: (Boolean) -> Unit,
     onTestNotification: () -> Unit,
     onOpenDownloadNotificationSettings: () -> Unit,
+    isCheckingForUpdate: Boolean,
+    onCheckForUpdate: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var notificationSent by rememberSaveable { mutableStateOf(false) }
@@ -2076,6 +2240,12 @@ private fun SettingsScreen(
                 title = "自动粘贴与解析",
                 summary = if (autoPasteParseEnabled) "已开启 · 进入应用自动识别链接" else "已关闭",
                 onClick = { pageName = SettingsPage.Automation.name }
+            )
+            SettingsEntry(
+                icon = Icons.Outlined.SystemUpdate,
+                title = "检查更新",
+                summary = if (isCheckingForUpdate) "正在检查更新中" else "当前版本 ${BuildConfig.VERSION_NAME}",
+                onClick = onCheckForUpdate
             )
             SettingsEntry(
                 icon = Icons.Outlined.Info,

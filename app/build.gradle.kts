@@ -23,13 +23,17 @@ android {
         minSdk = 31
         targetSdk = 36
         // Keep this above APP/03's 1508 so the update is accepted as an upgrade.
-        versionCode = 2002
-        versionName = "2.0.2"
+        versionCode = 2003
+        versionName = "2.0.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
+        debug {
+            // Keep Android Studio runs separate from the signed production package.
+            applicationIdSuffix = ".debug"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true

@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-`2.0.2`（内部版本号：`2002`）
+`2.0.3`（内部版本号：`2003`）
 
 ## 功能
 
@@ -14,6 +14,8 @@
 - 下载完成通知
 - 深色模式、主题色与悬浮底栏设置
 - 关于页面提供项目开源地址
+- 启动时从 GitHub / Gitee Releases 静默检查更新
+- 在应用内下载并校验签名后打开系统安装器
 
 ## 构建
 
@@ -38,6 +40,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\sign-release.ps1
 ## 开源地址
 
 https://github.com/dhvbjvvb/JIQU2
+
+国内镜像：
+
+https://gitee.com/DIOT486/JIQU2
 
 ## 许可证
 
