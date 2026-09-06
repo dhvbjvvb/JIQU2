@@ -38,6 +38,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -117,6 +118,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -127,6 +133,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
@@ -162,9 +169,17 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.io.BufferedInputStream
 import java.util.concurrent.Semaphore
+import kotlin.math.roundToInt
 
 private enum class AppDestination(val label: String) { Parse("解析"), History("历史"), Settings("设置") }
 private enum class SettingsPage { Main, Theme, Downloads, Automation, About }
+
+internal fun destinationIndexForPosition(positionX: Float, width: Float, itemCount: Int): Int {
+    if (itemCount <= 1 || width <= 0f) return 0
+    return (positionX.coerceIn(0f, width) / (width / itemCount))
+        .toInt()
+        .coerceIn(0, itemCount - 1)
+}
 
 private val httpUrlPattern = Regex("""https?://[^\s<>"'，。！？；、）】}]+""", RegexOption.IGNORE_CASE)
 
@@ -981,10 +996,6 @@ private fun ParseScreen(
         AnimatedVisibility(visible = state.errorMessage != null, enter = fadeIn(), exit = fadeOut()) {
             GlassCard { Text(state.errorMessage.orEmpty(), color = MaterialTheme.colorScheme.error) }
         }
-        if (appleFloatingNav) {
-            Spacer(Modifier.height(86.dp))
-            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
-        }
     }
 }
 
@@ -1053,48 +1064,114 @@ private fun FloatingNavigationBar(
     onDestinationChange: (AppDestination) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val destinations = AppDestination.entries
+    val density = LocalDensity.current
+    val hapticFeedback = LocalHapticFeedback.current
+    var barWidthPx by remember { mutableStateOf(0f) }
+    var dragPositionX by remember { mutableStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
+    val slotWidthPx = if (barWidthPx > 0f) barWidthPx / destinations.size else 0f
+    val restingPosition = destination.ordinal * slotWidthPx
+    val indicatorTarget = if (isDragging) {
+        (dragPositionX - slotWidthPx / 2f).coerceIn(0f, (barWidthPx - slotWidthPx).coerceAtLeast(0f))
+    } else {
+        restingPosition
+    }
+    val indicatorPosition by animateFloatAsState(
+        targetValue = indicatorTarget,
+        animationSpec = if (isDragging) tween(45) else spring(
+            dampingRatio = Spring.DampingRatioMediumBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        label = "floating-navigation-indicator"
+    )
+
+    fun selectAt(positionX: Float) {
+        dragPositionX = positionX.coerceIn(0f, barWidthPx)
+        val target = destinations[destinationIndexForPosition(positionX, barWidthPx, destinations.size)]
+        onDestinationChange(target)
+    }
+
     Box(
         modifier = modifier
             .fillMaxWidth()
             .windowInsetsPadding(WindowInsets.navigationBars)
-            .padding(bottom = 14.dp)
+            .padding(horizontal = 18.dp, vertical = 12.dp)
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.88f)
+                .fillMaxWidth()
                 .align(Alignment.Center),
-            shape = RoundedCornerShape(36.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
-            shadowElevation = 18.dp
+            shape = RoundedCornerShape(32.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
+            shadowElevation = 22.dp
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().height(72.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(76.dp)
+                    .onSizeChanged { barWidthPx = it.width.toFloat() }
+                    .pointerInput(barWidthPx) {
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { position ->
+                                isDragging = true
+                                hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                                selectAt(position.x)
+                            },
+                            onDragCancel = { isDragging = false },
+                            onDragEnd = { isDragging = false },
+                            onDrag = { change, _ ->
+                                selectAt(change.position.x)
+                                change.consume()
+                            }
+                        )
+                    }
             ) {
-                AppDestination.entries.forEach { item ->
-                    NavigationBarItem(
-                        modifier = Modifier.weight(1f).pressScaleOnPointer(0.94f),
-                        selected = destination == item,
-                        onClick = { onDestinationChange(item) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                            unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                            unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
-                        ),
-                        icon = {
-                            Icon(
-                                when (item) {
-                                    AppDestination.Parse -> Icons.Outlined.Link
-                                    AppDestination.History -> Icons.Outlined.History
-                                    AppDestination.Settings -> Icons.Outlined.Settings
-                                }, item.label
-                            )
-                        },
-                        label = { Text(item.label) }
-                    )
+                if (slotWidthPx > 0f) {
+                    Box(
+                        modifier = Modifier
+                            .offset { IntOffset(indicatorPosition.roundToInt(), 0) }
+                            .width(with(density) { slotWidthPx.toDp() })
+                            .fillMaxHeight()
+                            .padding(4.dp)
+                    ) {
+                        Surface(
+                            modifier = Modifier.fillMaxSize(),
+                            shape = RoundedCornerShape(28.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shadowElevation = if (isDragging) 14.dp else 7.dp
+                        ) {}
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    destinations.forEach { item ->
+                        NavigationBarItem(
+                            modifier = Modifier.weight(1f).pressScaleOnPointer(0.94f),
+                            selected = destination == item,
+                            onClick = { onDestinationChange(item) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = Color.Transparent,
+                                unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                            ),
+                            icon = {
+                                Icon(
+                                    when (item) {
+                                        AppDestination.Parse -> Icons.Outlined.Link
+                                        AppDestination.History -> Icons.Outlined.History
+                                        AppDestination.Settings -> Icons.Outlined.Settings
+                                    }, item.label
+                                )
+                            },
+                            label = { Text(item.label) }
+                        )
+                    }
                 }
             }
         }
@@ -2077,7 +2154,7 @@ private fun HistoryScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = if (appleFloatingNav) 112.dp else 18.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 18.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2185,9 +2262,6 @@ private fun HistoryScreen(
                     }
                 }
             }
-        }
-        if (appleFloatingNav) {
-            Spacer(Modifier.windowInsetsBottomHeight(WindowInsets.navigationBars))
         }
     }
 }
