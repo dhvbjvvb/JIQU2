@@ -18,8 +18,8 @@ android {
     }
 
     defaultConfig {
-        // Keep the package id used by APP/03 so Android can treat this as an upgrade.
-        applicationId = "com.jiqu.app"
+        // Keep the package id used by the 2.0.6 release and all subsequent updates.
+        applicationId = "com.jiqu.lite"
         minSdk = 31
         targetSdk = 36
         // Keep this above APP/03's 1508 so the update is accepted as an upgrade.

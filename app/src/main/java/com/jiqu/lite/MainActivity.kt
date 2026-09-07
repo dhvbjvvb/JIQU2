@@ -1757,8 +1757,9 @@ private fun UpdateStatusDialog(
                         }
                         Text(
                             "选择蓝奏云后，提取码会自动复制到剪贴板。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     }
                 }

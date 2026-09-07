@@ -30,7 +30,7 @@ R8 优化后的 APK 位于 `app/build/outputs/apk/release/`。项目需要在 `l
 
 ### Release 签名
 
-当前项目沿用旧版 JIQU（`com.jiqu.app`）的 Release 证书，以支持覆盖升级。配置好 `JIQU_RELEASE_KEYSTORE`、`JIQU_RELEASE_KEY_ALIAS`、`JIQU_RELEASE_LINEAGE` 和 `JIQU_RELEASE_STORE_PASSWORD` 用户环境变量后执行：
+当前项目使用 `com.jiqu.lite` 包名及 Release 证书，以支持 2.0.6 及后续版本覆盖升级。配置好 `JIQU_RELEASE_KEYSTORE`、`JIQU_RELEASE_KEY_ALIAS`、`JIQU_RELEASE_LINEAGE` 和 `JIQU_RELEASE_STORE_PASSWORD` 用户环境变量后执行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\sign-release.ps1
