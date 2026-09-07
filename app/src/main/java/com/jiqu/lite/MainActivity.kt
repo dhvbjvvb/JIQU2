@@ -167,6 +167,7 @@ import com.jiqu.lite.data.ParsedMedia
 import com.jiqu.lite.data.MediaDownloadOption
 import com.jiqu.lite.data.MediaAsset
 import com.jiqu.lite.data.isSupportedMediaUrl
+import com.jiqu.lite.data.normalizeMediaSourceUrl
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.delay
@@ -198,6 +199,7 @@ private fun extractHttpUrl(text: String): String? = httpUrlPattern.find(text)
     ?.value
     ?.trimEnd('.', ',', '!', '?', ';', ':', '。', '，', '！', '？', '；', '：', ')', ']', '}')
     ?.takeIf { url -> Uri.parse(url).host?.isNotBlank() == true }
+    ?.let(::normalizeMediaSourceUrl)
 
 private data class ParseHistoryEntry(
     val sourceUrl: String,
@@ -1281,7 +1283,9 @@ private fun MediaPreviewWindow(
     var isPlaying by remember(previewUrl) { mutableStateOf(false) }
     var playWhenReady by remember(previewUrl) { mutableStateOf(false) }
     var playbackPosition by remember(previewUrl) { mutableIntStateOf(0) }
-    var duration by remember(previewUrl) { mutableIntStateOf(0) }
+    var duration by remember(previewUrl) {
+        mutableIntStateOf(media.durationMs?.toInt()?.coerceAtLeast(0) ?: 0)
+    }
     val previewVideoAlpha by animateFloatAsState(
         targetValue = if (hasPreviewFrame) 1f else 0f,
         animationSpec = tween(180),
@@ -1299,6 +1303,20 @@ private fun MediaPreviewWindow(
         while (isPrepared && isPlaying) {
             playbackPosition = previewPlayer?.currentPosition ?: playbackPosition
             delay(250)
+        }
+    }
+    // Some signed Douyin streams report zero briefly even after preparation.
+    // Keep the API duration visible immediately, then replace it with the
+    // player value as soon as the stream exposes reliable metadata.
+    LaunchedEffect(previewPlayer, isPrepared) {
+        val player = previewPlayer ?: return@LaunchedEffect
+        while (isPrepared) {
+            val playerDuration = runCatching { player.duration }.getOrDefault(0)
+            if (playerDuration > 0) {
+                duration = playerDuration
+                break
+            }
+            delay(500)
         }
     }
     // A network-backed MediaPlayer may take several seconds to prepare. Keep
@@ -1380,7 +1398,7 @@ private fun MediaPreviewWindow(
                                         previewOption.height ?: 0
                                     )
                                     player.setOnPreparedListener {
-                                        duration = player.duration.coerceAtLeast(0)
+                                        player.duration.takeIf { it > 0 }?.let { duration = it }
                                         playbackPosition = 0
                                         isPlaying = false
                                         isPrepared = true
@@ -1414,7 +1432,14 @@ private fun MediaPreviewWindow(
                                         true
                                     }
                                     runCatching {
-                                        player.setDataSource(previewUrl)
+                                        player.setDataSource(
+                                            viewContext,
+                                            Uri.parse(previewUrl),
+                                            mapOf(
+                                                "User-Agent" to "Mozilla/5.0 (Android) Jiqu/1.0",
+                                                "Referer" to "https://www.douyin.com/"
+                                            )
+                                        )
                                         player.prepareAsync()
                                     }.onFailure {
                                         previewFailed = true

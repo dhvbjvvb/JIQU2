@@ -1,6 +1,7 @@
 package com.jiqu.lite
 
 import com.jiqu.lite.data.isDouyinUrl
+import com.jiqu.lite.data.normalizeMediaSourceUrl
 import com.jiqu.lite.data.isKuaishouUrl
 import com.jiqu.lite.data.isWechatChannelsUrl
 import org.junit.Test
@@ -8,6 +9,14 @@ import org.junit.Test
 import org.junit.Assert.*
 
 class ExampleUnitTest {
+    @Test
+    fun escapedDouyinLinksAreNormalizedBeforeParsing() {
+        assertEquals(
+            "https://v.douyin.com/-XhICs_TxNs/",
+            normalizeMediaSourceUrl("  https://v.douyin.com/-XhICs\\_TxNs/  ")
+        )
+    }
+
     @Test
     fun douyinHostsAreAccepted() {
         assertTrue(isDouyinUrl("https://v.douyin.com/XBwlKFr1ya0/"))

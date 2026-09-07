@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -51,7 +52,8 @@ data class ParsedMedia(
     val coverUrl: String?,
     val audioUrl: String?,
     val downloadOptions: List<MediaDownloadOption>,
-    val assets: List<MediaAsset> = emptyList()
+    val assets: List<MediaAsset> = emptyList(),
+    val durationMs: Long? = null
 )
 
 data class MediaAsset(
@@ -77,6 +79,14 @@ internal fun isDouyinUrl(sourceUrl: String): Boolean {
     return host == "douyin.com" || host.endsWith(".douyin.com") ||
         host == "iesdouyin.com" || host.endsWith(".iesdouyin.com")
 }
+
+internal fun normalizeMediaSourceUrl(sourceUrl: String): String = sourceUrl
+    .trim()
+    // Links copied from Markdown or escaped text can contain `\\_` in the path.
+    .replace("\\", "")
+
+private const val DOUYIN_SHORT_HOST = "v.douyin.com"
+private val douyinVideoPathPattern = Regex("""/(?:share/)?video/(\d+)""", RegexOption.IGNORE_CASE)
 
 internal fun isWechatChannelsUrl(sourceUrl: String): Boolean {
     val host = runCatching { URL(sourceUrl).host.lowercase() }.getOrDefault("")
@@ -116,7 +126,7 @@ private fun mediaPlatformForUrl(sourceUrl: String): MediaPlatform? = when {
 internal fun isSupportedMediaUrl(sourceUrl: String): Boolean = mediaPlatformForUrl(sourceUrl) != null
 
 suspend fun parseMediaUrl(sourceUrl: String): Result<ParsedMedia> = coroutineScope {
-    val normalizedSourceUrl = sourceUrl.trim()
+    val normalizedSourceUrl = normalizeMediaSourceUrl(sourceUrl)
     val request = parseInFlightMutex.withLock {
         parseInFlight[normalizedSourceUrl]
             ?: parseRequestScope.async { parseMediaUrlInternal(normalizedSourceUrl) }
@@ -143,11 +153,17 @@ private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<P
                 ?.media
         }?.let { return@runCatching it }
 
+        val apiSourceUrl = if (platform == MediaPlatform.DOUYIN) {
+            canonicalizeDouyinSourceUrl(normalizedSourceUrl)
+        } else {
+            normalizedSourceUrl
+        }
+        val apiSourceUrls = listOf(apiSourceUrl, normalizedSourceUrl).distinct()
         val candidates = coroutineScope {
             List(PARSE_SAMPLE_COUNT) {
                 async(Dispatchers.IO) {
                     runCatching {
-                        val root = requestParseResult(normalizedSourceUrl, platform!!)
+                        val root = requestParseResultWithRetry(apiSourceUrls, platform!!)
                         val data = root.optJSONObject("data") ?: throw IllegalStateException("解析结果为空")
                         val durationMs = mediaDurationMs(data)
                         val defaultFormat = data.optString("format").ifBlank { "mp4" }
@@ -172,6 +188,7 @@ private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<P
         val bestCandidate = sizedCandidates.maxByOrNull { candidateQuality(it.options) }!!
         val root = bestCandidate.root
         val data = bestCandidate.data
+        val durationMs = mediaDurationMs(data)
         val mergedOptions = mergeDownloadOptions(sizedCandidates.flatMap { it.options })
         val rawType = data.optString("type").lowercase()
         val largestExplicitVideo = mergedOptions
@@ -227,7 +244,8 @@ private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<P
                 .ifBlank { music?.optString("url").orEmpty() }
                 .ifBlank { null },
             downloadOptions = options,
-            assets = assets
+            assets = assets,
+            durationMs = durationMs
         ).also { media ->
             synchronized(parseCache) {
                 parseCache[normalizedSourceUrl] = CachedParse(media, System.currentTimeMillis())
@@ -298,6 +316,7 @@ private fun buildMediaAssets(
 }
 
 private const val PARSE_SAMPLE_COUNT = 2
+private const val PARSE_ATTEMPT_COUNT = 3
 
 private data class ParseCandidate(
     val root: JSONObject,
@@ -414,8 +433,44 @@ private fun qualityHeight(quality: String): Int {
 }
 
 private fun mediaDurationMs(data: JSONObject): Long? =
-    data.optJSONObject("extra")?.optLong("duration_ms")?.takeIf { it > 0 }
-        ?: data.optDouble("duration").takeIf { it > 0 }?.let { (it * 1_000).toLong() }
+    sequenceOf(
+        data.optJSONObject("extra")?.optLong("duration_ms") ?: 0L,
+        data.optLong("duration_ms"),
+        data.optLong("video_duration_ms")
+    ).firstOrNull { it > 0 }
+        ?: sequenceOf(
+            data.optDouble("duration"),
+            data.optDouble("video_duration"),
+            data.optJSONObject("extra")?.optDouble("duration") ?: 0.0
+        ).firstOrNull { it > 0.0 }?.let { (it * 1_000).toLong() }
+
+private fun canonicalizeDouyinSourceUrl(sourceUrl: String): String {
+    val parsedUrl = runCatching { URL(sourceUrl) }.getOrNull() ?: return sourceUrl
+    douyinVideoPathPattern.find(parsedUrl.path)?.groupValues?.getOrNull(1)?.let { videoId ->
+        return "https://www.douyin.com/video/$videoId"
+    }
+    if (!parsedUrl.host.equals(DOUYIN_SHORT_HOST, ignoreCase = true)) return sourceUrl
+
+    val connection = (parsedUrl.openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 8_000
+        readTimeout = 8_000
+        instanceFollowRedirects = false
+        setRequestProperty("User-Agent", "Mozilla/5.0 (Android) Jiqu/1.0")
+        setRequestProperty("Accept", "text/html,application/xhtml+xml")
+    }
+    return try {
+        val location = connection.getHeaderField("Location") ?: return sourceUrl
+        val redirectedUrl = URL(parsedUrl, location)
+        val videoId = douyinVideoPathPattern.find(redirectedUrl.path)?.groupValues?.getOrNull(1)
+            ?: return sourceUrl
+        "https://www.douyin.com/video/$videoId"
+    } catch (_: Exception) {
+        sourceUrl
+    } finally {
+        connection.disconnect()
+    }
+}
 
 private fun buildDownloadOptions(
     data: JSONObject,
@@ -608,6 +663,25 @@ private fun buildDownloadOptions(
             .thenByDescending { it.bitRate ?: 0 }
             .thenByDescending { it.sizeBytes ?: 0 }
     )
+}
+
+private suspend fun requestParseResultWithRetry(
+    sourceUrls: List<String>,
+    platform: MediaPlatform
+): JSONObject {
+    var lastFailure: Throwable? = null
+    repeat(PARSE_ATTEMPT_COUNT) { attempt ->
+        for (sourceUrl in sourceUrls) {
+            try {
+                return requestParseResult(sourceUrl, platform)
+            } catch (failure: Throwable) {
+                if (failure is kotlinx.coroutines.CancellationException) throw failure
+                lastFailure = failure
+            }
+        }
+        if (attempt + 1 < PARSE_ATTEMPT_COUNT) delay(350L * (attempt + 1))
+    }
+    throw lastFailure ?: IllegalStateException("${platform.displayName}解析服务暂时不可用")
 }
 
 private fun requestParseResult(sourceUrl: String, platform: MediaPlatform): JSONObject {
