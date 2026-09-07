@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import java.io.IOException
 
 internal class DownloadWorker(
     appContext: Context,
@@ -24,9 +25,19 @@ internal class DownloadWorker(
             }
         }.fold(
             onSuccess = { Result.success() },
-            onFailure = { error -> Result.failure(workDataOf(KEY_ERROR to (error.message ?: "下载失败，请稍后重试"))) }
+            onFailure = { error ->
+                if (runAttemptCount < MAX_RETRY_ATTEMPTS && error.isTransientDownloadError()) {
+                    Result.retry()
+                } else {
+                    Result.failure(workDataOf(KEY_ERROR to (error.message ?: "下载失败，请稍后重试")))
+                }
+            }
         )
     }
+
+    private fun Throwable.isTransientDownloadError(): Boolean =
+        this is IOException || (this is IllegalStateException &&
+            message.orEmpty().contains(Regex("服务器返回 (408|429|5\\d{2})")))
 
     companion object {
         const val TAG = "jiqu_download"
@@ -39,5 +50,6 @@ internal class DownloadWorker(
         const val KEY_TOTAL = "total"
         const val KEY_THREADS = "threads"
         const val KEY_ERROR = "error"
+        const val MAX_RETRY_ATTEMPTS = 3
     }
 }

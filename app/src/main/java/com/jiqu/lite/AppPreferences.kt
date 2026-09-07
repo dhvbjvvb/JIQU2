@@ -41,7 +41,6 @@ internal object DownloadCompletionNotification {
 
     /** Remove old channels once and create the single completion channel with system defaults. */
     fun ensureChannel(context: Context, manager: NotificationManager) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         // On Android 13+, creating the channel before notification permission is granted can
         // make some ROMs initialize the category with their own disabled defaults.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&

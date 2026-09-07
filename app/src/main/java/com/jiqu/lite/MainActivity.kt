@@ -107,6 +107,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -156,7 +158,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import com.jiqu.lite.ui.theme.即取Theme
+import com.jiqu.lite.ui.theme.JiquTheme
 import com.jiqu.lite.data.ParsedMedia
 import com.jiqu.lite.data.MediaDownloadOption
 import com.jiqu.lite.data.MediaAsset
@@ -478,7 +480,7 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(preferences.getBoolean(AppPreferences.DARK_THEME, false))
             }
             var accentHue by remember {
-                mutableStateOf(preferences.getFloat(AppPreferences.ACCENT_HUE, 196f))
+                mutableFloatStateOf(preferences.getFloat(AppPreferences.ACCENT_HUE, 196f))
             }
             var appleFloatingNav by remember {
                 mutableStateOf(preferences.getBoolean(AppPreferences.APPLE_FLOATING_NAV, true))
@@ -498,7 +500,7 @@ class MainActivity : ComponentActivity() {
             var autoPasteParseEnabled by remember {
                 mutableStateOf(preferences.getBoolean(AppPreferences.AUTO_PASTE_PARSE, true))
             }
-            即取Theme(darkTheme = darkTheme, accentHue = accentHue) {
+            JiquTheme(darkTheme = darkTheme, accentHue = accentHue) {
                 JiquApp(
                     darkTheme = darkTheme,
                     accentHue = accentHue,
@@ -613,14 +615,12 @@ class MainActivity : ComponentActivity() {
             return
         }
         ensureDownloadCompletionChannel()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startActivity(
-                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                    putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                    putExtra(Settings.EXTRA_CHANNEL_ID, DownloadCompletionNotification.CHANNEL_ID)
-                }
-            )
-        }
+        startActivity(
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                putExtra(Settings.EXTRA_CHANNEL_ID, DownloadCompletionNotification.CHANNEL_ID)
+            }
+        )
     }
 
     private fun enqueueDownload(media: ParsedMedia, option: MediaDownloadOption) {
@@ -927,7 +927,7 @@ private fun ParseScreen(
     val parseStages = remember {
         listOf("正在连接解析服务", "正在提取媒体信息", "正在准备预览")
     }
-    var parseStageIndex by rememberSaveable { mutableStateOf(0) }
+    var parseStageIndex by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(state.parsing) {
         if (state.parsing) {
             parseStageIndex = 0
@@ -1100,8 +1100,8 @@ private fun FloatingNavigationBar(
     val destinations = AppDestination.entries
     val density = LocalDensity.current
     val hapticFeedback = LocalHapticFeedback.current
-    var barWidthPx by remember { mutableStateOf(0f) }
-    var dragPositionX by remember { mutableStateOf(0f) }
+    var barWidthPx by remember { mutableFloatStateOf(0f) }
+    var dragPositionX by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
     val slotWidthPx = if (barWidthPx > 0f) barWidthPx / destinations.size else 0f
     val restingPosition = destination.ordinal * slotWidthPx
@@ -1272,8 +1272,8 @@ private fun MediaPreviewWindow(
     var hasPreviewFrame by remember(previewUrl) { mutableStateOf(false) }
     var previewFailed by remember(previewUrl) { mutableStateOf(false) }
     var isPlaying by remember(previewUrl) { mutableStateOf(false) }
-    var playbackPosition by remember(previewUrl) { mutableStateOf(0) }
-    var duration by remember(previewUrl) { mutableStateOf(0) }
+    var playbackPosition by remember(previewUrl) { mutableIntStateOf(0) }
+    var duration by remember(previewUrl) { mutableIntStateOf(0) }
     var coverBitmap by remember(media.coverUrl) {
         mutableStateOf(media.coverUrl?.let { url -> synchronized(previewBitmapCache) { previewBitmapCache.get(url) } })
     }
@@ -1728,6 +1728,14 @@ private fun UpdateStatusDialog(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        if (state.update.versionName == "2.0.6" && BuildConfig.VERSION_NAME != "2.0.6") {
+                            Text(
+                                "提示：2.0.6 起包名改为 com.jiqu.lite，无法覆盖旧版 com.jiqu.app，请先卸载旧版。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Text(
                             state.update.releaseNotes,
                             modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
@@ -1950,7 +1958,7 @@ private fun DownloadQualityDialog(
     onDismiss: () -> Unit,
     onDownload: (MediaDownloadOption) -> Unit
 ) {
-    var selectedIndex by remember(options) { mutableStateOf(0) }
+    var selectedIndex by remember(options) { mutableIntStateOf(0) }
     var showLargeFileConfirm by rememberSaveable { mutableStateOf(false) }
     val selectedOption = options.getOrNull(selectedIndex)
     AlertDialog(
@@ -2122,8 +2130,8 @@ private fun AudioPreviewCard(audioUrl: String, onDownload: () -> Unit) {
     var mediaPlayer by remember(audioUrl) { mutableStateOf<MediaPlayer?>(null) }
     var isPrepared by remember(audioUrl) { mutableStateOf(false) }
     var isPlaying by remember(audioUrl) { mutableStateOf(false) }
-    var playbackPosition by remember(audioUrl) { mutableStateOf(0) }
-    var duration by remember(audioUrl) { mutableStateOf(0) }
+    var playbackPosition by remember(audioUrl) { mutableIntStateOf(0) }
+    var duration by remember(audioUrl) { mutableIntStateOf(0) }
 
     DisposableEffect(audioUrl) {
         val player = MediaPlayer()
@@ -2764,7 +2772,7 @@ private fun ThemeChoice(label: String, selected: Boolean, onClick: () -> Unit, m
 @Preview(showBackground = true)
 @Composable
 private fun JiquPreview() {
-    即取Theme {
+    JiquTheme {
         JiquApp(
             darkTheme = false,
             accentHue = 196f,

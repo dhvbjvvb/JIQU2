@@ -2,9 +2,14 @@ package com.jiqu.lite.data
 
 import com.jiqu.lite.BuildConfig
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -61,6 +66,9 @@ private const val KUAISHOU_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/ksjx"
 private const val PARSE_CACHE_DURATION_MS = 5 * 60 * 1_000L
 private const val DOUYIN_HIGH_QUALITY_PLAY_ENDPOINT = "https://www.douyin.com/aweme/v1/play/"
 private val parseCache = mutableMapOf<String, CachedParse>()
+private val parseInFlight = mutableMapOf<String, Deferred<Result<ParsedMedia>>>()
+private val parseInFlightMutex = Mutex()
+private val parseRequestScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 private data class CachedParse(val media: ParsedMedia, val cachedAt: Long)
 
@@ -107,9 +115,24 @@ private fun mediaPlatformForUrl(sourceUrl: String): MediaPlatform? = when {
 
 internal fun isSupportedMediaUrl(sourceUrl: String): Boolean = mediaPlatformForUrl(sourceUrl) != null
 
-suspend fun parseMediaUrl(sourceUrl: String): Result<ParsedMedia> = withContext(Dispatchers.IO) {
+suspend fun parseMediaUrl(sourceUrl: String): Result<ParsedMedia> = coroutineScope {
+    val normalizedSourceUrl = sourceUrl.trim()
+    val request = parseInFlightMutex.withLock {
+        parseInFlight[normalizedSourceUrl]
+            ?: parseRequestScope.async { parseMediaUrlInternal(normalizedSourceUrl) }
+                .also { parseInFlight[normalizedSourceUrl] = it }
+    }
+    try {
+        request.await()
+    } finally {
+        parseInFlightMutex.withLock {
+            if (parseInFlight[normalizedSourceUrl] === request) parseInFlight.remove(normalizedSourceUrl)
+        }
+    }
+}
+
+private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<ParsedMedia> = withContext(Dispatchers.IO) {
     runCatching {
-        val normalizedSourceUrl = sourceUrl.trim()
         require(normalizedSourceUrl.startsWith("http://") || normalizedSourceUrl.startsWith("https://")) { "请输入有效链接" }
         val platform = mediaPlatformForUrl(normalizedSourceUrl)
         require(platform != null) { "目前仅支持抖音、微信视频号、快手、豆包、即梦和皮皮搞笑链接" }
@@ -274,7 +297,7 @@ private fun buildMediaAssets(
     return assets
 }
 
-private const val PARSE_SAMPLE_COUNT = 3
+private const val PARSE_SAMPLE_COUNT = 2
 
 private data class ParseCandidate(
     val root: JSONObject,

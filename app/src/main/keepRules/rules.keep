@@ -12,6 +12,9 @@
 #}
 
 # WorkManager initializes its generated Room database implementation by reflection.
-# Keep the implementation and worker constructors available in minified release builds.
--keep class androidx.work.impl.** { *; }
--keep class com.jiqu.lite.DownloadWorker { *; }
+-keep class androidx.work.impl.WorkDatabase_Impl {
+    public <init>();
+}
+-keep class com.jiqu.lite.DownloadWorker {
+    public <init>(android.content.Context, androidx.work.WorkerParameters);
+}

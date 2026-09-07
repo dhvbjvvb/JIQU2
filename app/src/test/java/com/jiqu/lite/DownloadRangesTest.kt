@@ -1,15 +1,14 @@
 package com.jiqu.lite
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DownloadRangesTest {
     @Test
-    fun createsSixtyFourContinuousRangesForNormalFile() {
+    fun createsSingleRangeForSmallFile() {
         val ranges = calculateByteRanges(10_003)
 
-        assertEquals(64, ranges.size)
+        assertEquals(1, ranges.size)
         assertEquals(0L, ranges.first().first)
         assertEquals(10_002L, ranges.last().last)
         ranges.zipWithNext().forEach { (current, next) ->
@@ -22,12 +21,19 @@ class DownloadRangesTest {
     fun smallFileDoesNotCreateEmptyRanges() {
         val ranges = calculateByteRanges(7)
 
-        assertEquals(7, ranges.size)
-        assertTrue(ranges.all { it.first == it.last })
+        assertEquals(1, ranges.size)
+        assertEquals(0L..6L, ranges.single())
     }
 
     @Test
-    fun requestedThreadCountIsCappedAtSixtyFour() {
-        assertEquals(64, calculateByteRanges(100_000, requestedParts = 128).size)
+    fun requestedThreadCountIsCappedAtEight() {
+        assertEquals(8, calculateByteRanges(300L * 1024L * 1024L, requestedParts = 128).size)
+    }
+
+    @Test
+    fun choosesThreadsByFileSize() {
+        assertEquals(1, recommendedDownloadThreads(19L * 1024L * 1024L))
+        assertEquals(4, recommendedDownloadThreads(20L * 1024L * 1024L))
+        assertEquals(8, recommendedDownloadThreads(200L * 1024L * 1024L))
     }
 }

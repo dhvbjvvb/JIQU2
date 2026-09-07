@@ -79,7 +79,7 @@ private val LightColorScheme = lightColorScheme(
 )
 
 @Composable
-fun 即取Theme(
+fun JiquTheme(
     darkTheme: Boolean = false,
     accentHue: Float = 196f,
     content: @Composable () -> Unit

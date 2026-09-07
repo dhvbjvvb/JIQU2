@@ -20,6 +20,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.Constraints
+import androidx.work.BackoffPolicy
 import androidx.work.Data
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
@@ -46,10 +47,13 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
-private const val MAX_DOWNLOAD_THREADS = 64
+private const val MAX_DOWNLOAD_THREADS = 8
+private const val SMALL_FILE_BYTES = 20L * 1024L * 1024L
+private const val LARGE_FILE_BYTES = 200L * 1024L * 1024L
 sealed interface DownloadUiState {
     data object Idle : DownloadUiState
     data class Preparing(val fileName: String) : DownloadUiState
@@ -96,6 +100,7 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
         val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
             .setInputData(input)
             .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
             .addTag(DownloadWorker.TAG)
             .build()
         workManager.enqueue(workRequest)
@@ -166,7 +171,16 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
 private data class RemoteFileInfo(val totalBytes: Long, val supportsRanges: Boolean)
 private data class ByteRange(val start: Long, val endInclusive: Long)
 
-internal fun calculateByteRanges(totalBytes: Long, requestedParts: Int = MAX_DOWNLOAD_THREADS): List<LongRange> {
+internal fun recommendedDownloadThreads(totalBytes: Long): Int = when {
+    totalBytes < SMALL_FILE_BYTES -> 1
+    totalBytes < LARGE_FILE_BYTES -> 4
+    else -> MAX_DOWNLOAD_THREADS
+}
+
+internal fun calculateByteRanges(
+    totalBytes: Long,
+    requestedParts: Int = recommendedDownloadThreads(totalBytes)
+): List<LongRange> {
     require(totalBytes > 0)
     val partCount = requestedParts.coerceIn(1, MAX_DOWNLOAD_THREADS).coerceAtMost(totalBytes.toIntSafe())
     val baseSize = totalBytes / partCount
