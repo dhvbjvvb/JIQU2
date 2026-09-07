@@ -17,9 +17,12 @@ class UpdateVersionTest {
     @Test
     fun acceptsOnlyExpectedReleaseHostsAndPaths() {
         assertTrue(isTrustedUpdateUrl("https://github.com/dhvbjvvb/JIQU2/releases/download/v2.0.3/app.apk"))
+        assertTrue(isTrustedUpdateUrl("https://gh-proxy.com/https://github.com/dhvbjvvb/JIQU2/releases/download/v2.0.3/app.apk"))
+        assertTrue(isTrustedUpdateUrl("https://ghfast.top/https://github.com/dhvbjvvb/JIQU2/releases/download/v2.0.3/app.apk"))
         assertFalse(isTrustedUpdateUrl("http://github.com/dhvbjvvb/JIQU2/releases/download/v2.0.3/app.apk"))
         assertFalse(isTrustedUpdateUrl("https://example.com/app.apk"))
         assertFalse(isTrustedUpdateUrl("https://github.com/another/repo/releases/download/v2/app.apk"))
         assertFalse(isTrustedUpdateUrl("https://gitee.com/DIOT486/JIQU2/attach_files/123/download/app.apk"))
+        assertFalse(isTrustedUpdateUrl("https://gh-proxy.com/https://github.com/another/repo/releases/download/v2/app.apk"))
     }
 }

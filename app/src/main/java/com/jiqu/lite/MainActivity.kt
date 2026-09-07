@@ -133,6 +133,10 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -1763,7 +1767,7 @@ private fun UpdateStatusDialog(
                             )
                         }
                         Text(
-                            state.update.releaseNotes,
+                            markdownToAnnotatedString(state.update.releaseNotes),
                             modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -1863,6 +1867,52 @@ private fun UpdateStatusDialog(
             }
         }
     )
+}
+
+/** Renders the Markdown subset used by GitHub release notes without flattening its structure. */
+private fun markdownToAnnotatedString(markdown: String): AnnotatedString = buildAnnotatedString {
+    val lines = markdown.replace("\r\n", "\n").lines()
+    lines.forEachIndexed { index, rawLine ->
+        if (index > 0) append("\n")
+        val line = rawLine.trimEnd()
+        val bullet = Regex("^\\s*([-*+])\\s+").find(line)
+        val ordered = Regex("^\\s*(\\d+)\\.\\s+").find(line)
+        when {
+            bullet != null -> {
+                append("• ")
+                appendMarkdownInline(line.removeRange(0, bullet.range.last + 1).trimStart())
+            }
+            ordered != null -> {
+                append("${ordered.groupValues[1]}. ")
+                appendMarkdownInline(line.removeRange(0, ordered.range.last + 1).trimStart())
+            }
+            line.trimStart().startsWith("#") -> {
+                val heading = line.trimStart().trimStart('#').trimStart()
+                withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { appendMarkdownInline(heading) }
+            }
+            else -> appendMarkdownInline(line)
+        }
+    }
+}
+
+private fun AnnotatedString.Builder.appendMarkdownInline(value: String) {
+    var index = 0
+    while (index < value.length) {
+        val rest = value.substring(index)
+        val match = Regex("^(\\*\\*|__)(.+?)\\1|^([*_])(.+?)\\3|^`([^`]+)`|^\\[([^]]+)]\\([^)]*\\)").find(rest)
+        if (match == null) {
+            append(value[index])
+            index++
+            continue
+        }
+        when {
+            match.groupValues[2].isNotEmpty() -> withStyle(SpanStyle(fontWeight = FontWeight.Bold)) { append(match.groupValues[2]) }
+            match.groupValues[4].isNotEmpty() -> withStyle(SpanStyle(fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)) { append(match.groupValues[4]) }
+            match.groupValues[5].isNotEmpty() -> withStyle(SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)) { append(match.groupValues[5]) }
+            match.groupValues[6].isNotEmpty() -> withStyle(SpanStyle(color = androidx.compose.ui.graphics.Color(0xFF1976D2), textDecoration = androidx.compose.ui.text.style.TextDecoration.Underline)) { append(match.groupValues[6]) }
+        }
+        index += match.value.length
+    }
 }
 
 @Composable

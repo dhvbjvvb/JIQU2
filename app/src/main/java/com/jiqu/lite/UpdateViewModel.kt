@@ -80,6 +80,7 @@ internal fun isTrustedUpdateUrl(url: String): Boolean = runCatching {
     val path = uri.path.lowercase()
     when (host) {
         "github.com" -> path.startsWith("/dhvbjvvb/jiqu2/releases/download/")
+        "gh-proxy.com", "ghfast.top" -> path.startsWith("/https://github.com/dhvbjvvb/jiqu2/releases/download/")
         else -> false
     }
 }.getOrDefault(false)
@@ -142,16 +143,19 @@ internal class ReleaseUpdateClient {
     }
 
     private fun checkGitHubWeb(): SourceResult = runCatching {
-        val latest = request(GITHUB_LATEST_URL, followRedirects = false)
+        val latest = GITHUB_LATEST_URLS.asSequence()
+            .map { request(it, followRedirects = false) }
+            .firstOrNull { it.code in 300..399 && !it.location.isNullOrBlank() }
+            ?: return SourceResult.Failed
         val location = latest.location ?: return SourceResult.Failed
         val tag = URI(location).path.substringAfterLast('/').takeIf { it.isNotBlank() }
             ?: return SourceResult.Failed
         if (tag.toVersionParts() == null) return SourceResult.Failed
 
-        val assetsPage = request(
-            "https://github.com/dhvbjvvb/JIQU2/releases/expanded_assets/$tag",
-            followRedirects = true
-        )
+        val assetsPage = GITHUB_ASSET_PAGE_BASES.asSequence()
+            .map { request("$it$tag", followRedirects = true) }
+            .firstOrNull { it.code in 200..299 }
+            ?: return SourceResult.Failed
         if (assetsPage.code !in 200..299) return SourceResult.Failed
         val path = APK_LINK_PATTERN.findAll(assetsPage.body)
             .map { it.groupValues[1].replace("&amp;", "&") }
@@ -173,6 +177,12 @@ internal class ReleaseUpdateClient {
     }.getOrDefault(SourceResult.Failed)
 
     private fun readGitHubReleaseNotes(tag: String): String = runCatching {
+        val apiNotes = GITHUB_API_TAG_BASES.asSequence()
+            .map { request("$it$tag", followRedirects = true, acceptJson = true) }
+            .firstOrNull { it.code in 200..299 }
+            ?.let { JSONObject(it.body).optString("body").trim() }
+            ?.takeIf { it.isNotBlank() }
+        if (!apiNotes.isNullOrBlank()) return apiNotes
         val page = request("https://github.com/dhvbjvvb/JIQU2/releases/tag/$tag", followRedirects = true)
         val html = RELEASE_NOTES_PATTERN.find(page.body)?.groupValues?.get(1).orEmpty()
         Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY).toString().trim()
@@ -227,7 +237,21 @@ internal class ReleaseUpdateClient {
             "https://ghfast.top/https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest",
             "https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest"
         )
-        const val GITHUB_LATEST_URL = "https://github.com/dhvbjvvb/JIQU2/releases/latest"
+        val GITHUB_API_TAG_BASES = listOf(
+            "https://gh-proxy.com/https://api.github.com/repos/dhvbjvvb/JIQU2/releases/tags/",
+            "https://ghfast.top/https://api.github.com/repos/dhvbjvvb/JIQU2/releases/tags/",
+            "https://api.github.com/repos/dhvbjvvb/JIQU2/releases/tags/"
+        )
+        val GITHUB_LATEST_URLS = listOf(
+            "https://gh-proxy.com/https://github.com/dhvbjvvb/JIQU2/releases/latest",
+            "https://ghfast.top/https://github.com/dhvbjvvb/JIQU2/releases/latest",
+            "https://github.com/dhvbjvvb/JIQU2/releases/latest"
+        )
+        val GITHUB_ASSET_PAGE_BASES = listOf(
+            "https://gh-proxy.com/https://github.com/dhvbjvvb/JIQU2/releases/expanded_assets/",
+            "https://ghfast.top/https://github.com/dhvbjvvb/JIQU2/releases/expanded_assets/",
+            "https://github.com/dhvbjvvb/JIQU2/releases/expanded_assets/"
+        )
         val APK_LINK_PATTERN = Regex(
             """href=[\"']([^\"']+/releases/download/[^\"']+\.apk(?:\?[^\"']*)?)[\"']""",
             RegexOption.IGNORE_CASE
@@ -387,44 +411,58 @@ internal class UpdateViewModel(application: Application) : AndroidViewModel(appl
         check(updateDirectory.exists() || updateDirectory.mkdirs()) { "无法创建更新缓存" }
         updateDirectory.listFiles()?.forEach(File::delete)
         val target = File(updateDirectory, "JIQU-${update.versionName}.apk")
-        val connection = (URL(update.downloadUrl).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 90_000
-            instanceFollowRedirects = true
-            setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("User-Agent", "JIQU-Android/${BuildConfig.VERSION_NAME}")
-        }
-        try {
-            check(connection.responseCode in 200..299) { "服务器返回 ${connection.responseCode}" }
-            val total = connection.getHeaderFieldLong("Content-Length", update.assetSizeBytes)
-                .coerceAtLeast(update.assetSizeBytes)
-            var downloaded = 0L
-            var lastUpdateAt = 0L
-            BufferedInputStream(connection.inputStream).use { input ->
-                BufferedOutputStream(FileOutputStream(target)).use { output ->
-                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        output.write(buffer, 0, count)
-                        downloaded += count
-                        val now = System.currentTimeMillis()
-                        if (now - lastUpdateAt >= 120L) {
-                            lastUpdateAt = now
-                            onProgress(downloaded, total)
+        val candidates = downloadCandidates(update.downloadUrl)
+        var lastError: Throwable? = null
+        for (candidate in candidates) {
+            val connection = (URL(candidate).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 90_000
+                instanceFollowRedirects = true
+                setRequestProperty("Accept-Encoding", "identity")
+                setRequestProperty("User-Agent", "JIQU-Android/${BuildConfig.VERSION_NAME}")
+            }
+            try {
+                check(connection.responseCode in 200..299) { "服务器返回 ${connection.responseCode}" }
+                val total = connection.getHeaderFieldLong("Content-Length", update.assetSizeBytes)
+                    .coerceAtLeast(update.assetSizeBytes)
+                var downloaded = 0L
+                var lastUpdateAt = 0L
+                BufferedInputStream(connection.inputStream).use { input ->
+                    BufferedOutputStream(FileOutputStream(target)).use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 8)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            output.write(buffer, 0, count)
+                            downloaded += count
+                            val now = System.currentTimeMillis()
+                            if (now - lastUpdateAt >= 120L) {
+                                lastUpdateAt = now
+                                onProgress(downloaded, total)
+                            }
                         }
                     }
                 }
+                check(target.length() > 0L) { "更新包为空" }
+                onProgress(target.length(), total.coerceAtLeast(target.length()))
+                return target
+            } catch (error: Throwable) {
+                lastError = error
+                target.delete()
+            } finally {
+                connection.disconnect()
             }
-            check(target.length() > 0L) { "更新包为空" }
-            onProgress(target.length(), total.coerceAtLeast(target.length()))
-            return target
-        } catch (error: Throwable) {
-            target.delete()
-            throw error
-        } finally {
-            connection.disconnect()
         }
+        throw lastError ?: IllegalStateException("无法下载更新包")
+    }
+
+    private fun downloadCandidates(original: String): List<String> {
+        val mirrors = listOf(
+            "https://gh-proxy.com/",
+            "https://ghfast.top/"
+        )
+        return (mirrors.map { it + original } + original).distinct()
+            .filter(::isTrustedUpdateUrl)
     }
 
     private fun validateDownloadedApk(file: File) {
