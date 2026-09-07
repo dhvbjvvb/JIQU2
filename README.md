@@ -4,10 +4,7 @@
 
 ## UI界面
 
-<img width="1280" height="2432" alt="解析板块" src="https://github.com/user-attachments/assets/46f890e8-821a-444a-acdc-83c53cb4338e" />
-<img width="1280" height="2432" alt="设置板块" src="https://github.com/user-attachments/assets/d6917023-a7b9-469d-a60d-bb6c69c15b4d" />
-<img width="1280" height="2432" alt="历史记录" src="https://github.com/user-attachments/assets/a5548491-a174-496d-98a7-10ca2fa38715" />
-<img width="1280" height="2432" alt="解析过程" src="https://github.com/user-attachments/assets/81867b1c-19d3-4334-bc35-e40bcec38864" />
+<img width="2696" height="1280" alt="9b5b511aa69d683ff575bf493dade807" src="https://github.com/user-attachments/assets/50e3488e-c0f1-4f7e-b882-8ddc1228227b" />
 
 ## 功能
 
