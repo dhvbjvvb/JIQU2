@@ -10,11 +10,14 @@ import android.media.MediaPlayer
 import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.os.Bundle
 import android.os.Build
 import android.provider.Settings
 import android.util.LruCache
-import android.widget.VideoView
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -25,6 +28,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -118,6 +122,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.onSizeChanged
@@ -172,7 +177,7 @@ import java.util.concurrent.Semaphore
 import kotlin.math.roundToInt
 
 private enum class AppDestination(val label: String) { Parse("解析"), History("历史"), Settings("设置") }
-private enum class SettingsPage { Main, Theme, Downloads, Automation, About }
+private enum class SettingsPage { Main, Theme, Downloads, Automation, Tutorials, About }
 
 internal fun destinationIndexForPosition(positionX: Float, width: Float, itemCount: Int): Int {
     if (itemCount <= 1 || width <= 0f) return 0
@@ -349,6 +354,26 @@ private fun formatBitRate(bitRate: Long?): String = when {
     else -> "$bitRate bps"
 }
 
+private fun String.isUsableMediaUrl(): Boolean = runCatching {
+    val uri = Uri.parse(trim())
+    uri.scheme in setOf("http", "https") && !uri.host.isNullOrBlank()
+}.getOrDefault(false)
+
+private fun applyPreviewAspectTransform(view: TextureView, videoWidth: Int, videoHeight: Int) {
+    val viewWidth = view.width
+    val viewHeight = view.height
+    if (videoWidth <= 0 || videoHeight <= 0 || viewWidth <= 0 || viewHeight <= 0) return
+    val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
+    val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
+    val scaleX = if (videoAspect < viewAspect) videoAspect / viewAspect else 1f
+    val scaleY = if (videoAspect > viewAspect) viewAspect / videoAspect else 1f
+    view.setTransform(
+        Matrix().apply {
+            setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+        }
+    )
+}
+
 private val previewBitmapCache = object : LruCache<String, Bitmap>(12 * 1024) {
     override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount / 1024
 }
@@ -514,7 +539,10 @@ class MainActivity : ComponentActivity() {
                     onCheckForUpdate = { updateViewModel.checkForUpdate(manual = true) },
                     onDismissUpdate = updateViewModel::dismiss,
                     onIgnoreAutomaticUpdates = updateViewModel::ignoreAutomaticChecks,
-                    onDownloadUpdate = { updateViewModel.downloadAndInstall(this@MainActivity, it) },
+                    onDownloadUpdate = updateViewModel::chooseDownloadChannel,
+                    onSelectUpdateChannel = { update, useGitHub ->
+                        updateViewModel.selectUpdateChannel(this@MainActivity, update, useGitHub)
+                    },
                     onContinueUpdateInstall = { updateViewModel.continuePendingInstall(this@MainActivity) }
                 )
             }
@@ -618,7 +646,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun enqueueAudioDownload(media: ParsedMedia) {
-        media.audioUrl?.let { audioUrl ->
+        media.audioUrl?.takeIf(String::isUsableMediaUrl)?.let { audioUrl ->
             val extension = Uri.parse(audioUrl).lastPathSegment
                 ?.substringAfterLast('.', "")
                 ?.lowercase()
@@ -693,6 +721,7 @@ private fun JiquApp(
     onDismissUpdate: () -> Unit = {},
     onIgnoreAutomaticUpdates: () -> Unit = {},
     onDownloadUpdate: (AppUpdate) -> Unit = {},
+    onSelectUpdateChannel: (AppUpdate, Boolean) -> Unit = { _, _ -> },
     onContinueUpdateInstall: () -> Unit = {}
 ) {
     var destinationName by rememberSaveable { mutableStateOf(AppDestination.Parse.name) }
@@ -875,6 +904,9 @@ private fun JiquApp(
         onRetryCheck = onCheckForUpdate,
         onIgnore = onIgnoreAutomaticUpdates,
         onDownload = onDownloadUpdate,
+        onSelectChannel = { update, useGitHub ->
+            onSelectUpdateChannel(update, useGitHub)
+        },
         onContinueInstall = onContinueUpdateInstall
     )
 }
@@ -906,7 +938,7 @@ private fun ParseScreen(
         }
     }
     Column(
-        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 18.dp),
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 0.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         AppHeader("解析 · 下载", "解析后向下滑动解锁更多")
@@ -996,6 +1028,7 @@ private fun ParseScreen(
         AnimatedVisibility(visible = state.errorMessage != null, enter = fadeIn(), exit = fadeOut()) {
             GlassCard { Text(state.errorMessage.orEmpty(), color = MaterialTheme.colorScheme.error) }
         }
+        Spacer(Modifier.height(if (appleFloatingNav) 112.dp else 18.dp))
     }
 }
 
@@ -1234,27 +1267,30 @@ private fun MediaPreviewWindow(
     val assets = media.assets
     var selectedAssets by remember(media.assets) { mutableStateOf(emptySet<Int>()) }
     var showDownloadDialog by remember(media.downloadUrl) { mutableStateOf(false) }
-    var videoView by remember(previewUrl) { mutableStateOf<VideoView?>(null) }
+    var previewPlayer by remember(previewUrl) { mutableStateOf<MediaPlayer?>(null) }
     var isPrepared by remember(previewUrl) { mutableStateOf(false) }
     var hasPreviewFrame by remember(previewUrl) { mutableStateOf(false) }
     var previewFailed by remember(previewUrl) { mutableStateOf(false) }
     var isPlaying by remember(previewUrl) { mutableStateOf(false) }
     var playbackPosition by remember(previewUrl) { mutableStateOf(0) }
     var duration by remember(previewUrl) { mutableStateOf(0) }
-
-    LaunchedEffect(media.coverUrl) {
-        withContext(Dispatchers.IO) { loadPreviewBitmap(media.coverUrl) }
+    var coverBitmap by remember(media.coverUrl) {
+        mutableStateOf(media.coverUrl?.let { url -> synchronized(previewBitmapCache) { previewBitmapCache.get(url) } })
     }
 
-    LaunchedEffect(videoView, isPrepared, isPlaying) {
+    LaunchedEffect(media.coverUrl) {
+        coverBitmap = withContext(Dispatchers.IO) { loadPreviewBitmap(media.coverUrl) }
+    }
+
+    LaunchedEffect(previewPlayer, isPrepared, isPlaying) {
         while (isPrepared && isPlaying) {
-            playbackPosition = videoView?.currentPosition ?: playbackPosition
+            playbackPosition = previewPlayer?.currentPosition ?: playbackPosition
             delay(250)
         }
     }
     LaunchedEffect(isActive) {
         if (!isActive) {
-            videoView?.let { player ->
+            previewPlayer?.let { player ->
                 if (player.isPlaying) {
                     playbackPosition = player.currentPosition
                     player.pause()
@@ -1303,39 +1339,81 @@ private fun MediaPreviewWindow(
             key(previewUrl) {
                 AndroidView(
                     factory = { viewContext ->
-                        VideoView(viewContext).apply {
-                            setOnPreparedListener { player ->
-                                duration = player.duration.coerceAtLeast(0)
-                                playbackPosition = 0
-                                isPlaying = false
-                                isPrepared = true
-                                player.setOnSeekCompleteListener { hasPreviewFrame = true }
-                                player.seekTo(1, MediaPlayer.SEEK_CLOSEST)
-                            }
-                            setOnInfoListener { _, what, _ ->
-                                if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                                    hasPreviewFrame = true
+                        TextureView(viewContext).apply {
+                            var previewSurface: Surface? = null
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(texture: SurfaceTexture, width: Int, height: Int) {
+                                    val surface = Surface(texture)
+                                    previewSurface = surface
+                                    val player = MediaPlayer()
+                                    previewPlayer = player
+                                    player.setSurface(surface)
+                                    applyPreviewAspectTransform(
+                                        this@apply,
+                                        previewOption.width ?: 0,
+                                        previewOption.height ?: 0
+                                    )
+                                    player.setOnPreparedListener {
+                                        duration = player.duration.coerceAtLeast(0)
+                                        playbackPosition = 0
+                                        isPlaying = false
+                                        isPrepared = true
+                                        applyPreviewAspectTransform(
+                                            this@apply,
+                                            player.videoWidth,
+                                            player.videoHeight
+                                        )
+                                        player.setOnSeekCompleteListener { hasPreviewFrame = true }
+                                        player.seekTo(1, MediaPlayer.SEEK_CLOSEST)
+                                    }
+                                    player.setOnVideoSizeChangedListener { _, width, height ->
+                                        applyPreviewAspectTransform(this@apply, width, height)
+                                    }
+                                    player.setOnInfoListener { _, what, _ ->
+                                        if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                                            hasPreviewFrame = true
+                                        }
+                                        false
+                                    }
+                                    player.setOnCompletionListener {
+                                        playbackPosition = duration
+                                        isPlaying = false
+                                    }
+                                    player.setOnErrorListener { _, _, _ ->
+                                        previewFailed = true
+                                        isPrepared = false
+                                        isPlaying = false
+                                        true
+                                    }
+                                    runCatching {
+                                        player.setDataSource(previewUrl)
+                                        player.prepareAsync()
+                                    }.onFailure {
+                                        previewFailed = true
+                                        isPrepared = false
+                                    }
                                 }
-                                false
+
+                                override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) = Unit
+
+                                override fun onSurfaceTextureDestroyed(texture: SurfaceTexture): Boolean {
+                                    previewPlayer?.let { player ->
+                                        player.release()
+                                        if (previewPlayer === player) previewPlayer = null
+                                    }
+                                    previewSurface?.release()
+                                    previewSurface = null
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
                             }
-                            setOnCompletionListener {
-                                playbackPosition = duration
-                                isPlaying = false
-                            }
-                            setOnErrorListener { _, _, _ ->
-                                previewFailed = true
-                                isPrepared = false
-                                isPlaying = false
-                                true
-                            }
-                            setVideoURI(Uri.parse(previewUrl))
-                            videoView = this
                         }
                     },
-                    modifier = Modifier.fillMaxSize(),
-                    onRelease = { releasedVideoView ->
-                        releasedVideoView.stopPlayback()
-                        if (videoView === releasedVideoView) videoView = null
+                    modifier = Modifier.fillMaxSize().alpha(if (hasPreviewFrame) 1f else 0f),
+                    onRelease = {
+                        previewPlayer?.release()
+                        previewPlayer = null
                     }
                 )
             }
@@ -1346,7 +1424,14 @@ private fun MediaPreviewWindow(
                         .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (previewFailed) {
+                    coverBitmap?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "媒体预览封面",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                        )
+                    } ?: if (previewFailed) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(
                                 Icons.Outlined.PlayArrow,
@@ -1381,7 +1466,7 @@ private fun MediaPreviewWindow(
             Surface(
                 onClick = {
                     if (isPrepared) {
-                        videoView?.let { player ->
+                        previewPlayer?.let { player ->
                             if (player.isPlaying) {
                                 playbackPosition = player.currentPosition
                                 player.pause()
@@ -1422,7 +1507,7 @@ private fun MediaPreviewWindow(
                 value = playbackPosition.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                 onValueChange = { position ->
                     playbackPosition = position.toInt().coerceIn(0, duration)
-                    videoView?.seekTo(playbackPosition)
+                    previewPlayer?.seekTo(playbackPosition)
                 },
                 valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
                 enabled = isPrepared,
@@ -1453,7 +1538,7 @@ private fun MediaPreviewWindow(
                 Text(if (assets.isNotEmpty()) "下载已选媒体（${selectedAssets.size}）" else "下载媒体")
             }
         }
-        media.audioUrl?.let { audioUrl ->
+        media.audioUrl?.takeIf(String::isUsableMediaUrl)?.let { audioUrl ->
             AudioPreviewCard(audioUrl = audioUrl, onDownload = { onDownloadAudio(media) })
         }
     }
@@ -1591,6 +1676,7 @@ private fun UpdateStatusDialog(
     onRetryCheck: () -> Unit,
     onIgnore: () -> Unit,
     onDownload: (AppUpdate) -> Unit,
+    onSelectChannel: (AppUpdate, Boolean) -> Unit,
     onContinueInstall: () -> Unit
 ) {
     if (state is UpdateUiState.Hidden) return
@@ -1605,6 +1691,7 @@ private fun UpdateStatusDialog(
                     UpdateUiState.Checking -> "检查更新"
                     UpdateUiState.UpToDate -> "检查更新"
                     is UpdateUiState.Available -> "发现新版本"
+                    is UpdateUiState.SelectingChannel -> "选择更新渠道"
                     is UpdateUiState.Failed -> "检查更新失败"
                     is UpdateUiState.Downloading -> "正在下载更新"
                     is UpdateUiState.AwaitingInstallPermission -> "允许安装更新"
@@ -1645,6 +1732,32 @@ private fun UpdateStatusDialog(
                             state.update.releaseNotes,
                             modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
                             style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                is UpdateUiState.SelectingChannel -> {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text("请选择下载方式")
+                        OutlinedButton(
+                            onClick = { onSelectChannel(state.update, true) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Outlined.Download, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("GitHub（应用内下载并安装）")
+                        }
+                        OutlinedButton(
+                            onClick = { onSelectChannel(state.update, false) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Outlined.Link, contentDescription = null)
+                            Spacer(Modifier.width(6.dp))
+                            Text("蓝奏云（浏览器手动下载）")
+                        }
+                        Text(
+                            "选择蓝奏云后，提取码会自动复制到剪贴板。",
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -1690,6 +1803,7 @@ private fun UpdateStatusDialog(
         dismissButton = {
             when (state) {
                 is UpdateUiState.Available -> TextButton(onClick = onIgnore) { Text("忽略") }
+                is UpdateUiState.SelectingChannel -> TextButton(onClick = onDismiss) { Text("取消") }
                 is UpdateUiState.Failed,
                 is UpdateUiState.DownloadFailed -> TextButton(onClick = onDismiss) { Text("关闭") }
                 else -> Unit
@@ -1707,7 +1821,7 @@ private fun UpdateStatusDialog(
                 is UpdateUiState.AwaitingInstallPermission -> Button(onClick = onContinueInstall) {
                     Text("前往授权")
                 }
-                is UpdateUiState.DownloadFailed -> Button(onClick = { onDownload(state.update) }) {
+                is UpdateUiState.DownloadFailed -> Button(onClick = { onSelectChannel(state.update, true) }) {
                     Text("重新下载")
                 }
                 else -> Unit
@@ -2168,7 +2282,7 @@ private fun HistoryScreen(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 18.dp),
+            .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 0.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2277,6 +2391,7 @@ private fun HistoryScreen(
                 }
             }
         }
+        Spacer(Modifier.height(if (appleFloatingNav) 112.dp else 18.dp))
     }
 }
 
@@ -2306,7 +2421,7 @@ private fun SettingsScreen(
     val sourceUrl = "https://github.com/dhvbjvvb/JIQU2"
     BackHandler(enabled = isActive && page != SettingsPage.Main) { pageName = SettingsPage.Main.name }
     Column(
-        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 18.dp),
+        modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 0.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         if (page == SettingsPage.Main) {
@@ -2337,6 +2452,12 @@ private fun SettingsScreen(
             )
             SettingsEntry(
                 icon = Icons.Outlined.Info,
+                title = "解析教程与支持",
+                summary = "查看支持的 APP 与分享链接教程",
+                onClick = { pageName = SettingsPage.Tutorials.name }
+            )
+            SettingsEntry(
+                icon = Icons.Outlined.Info,
                 title = "关于本 APP",
                 summary = "制作人：春日大阪",
                 onClick = { pageName = SettingsPage.About.name }
@@ -2351,6 +2472,7 @@ private fun SettingsScreen(
                         SettingsPage.Theme -> "主题与外观"
                         SettingsPage.Downloads -> "下载与通知"
                         SettingsPage.Automation -> "自动粘贴与解析"
+                        SettingsPage.Tutorials -> "解析教程与支持"
                         SettingsPage.About -> "关于本 APP"
                         SettingsPage.Main -> "设置"
                     },
@@ -2431,6 +2553,8 @@ private fun SettingsScreen(
                     DownloadPathRow("视频", "${DownloadPaths.DISPLAY_ROOT} / ${DownloadPaths.VIDEO}")
                     DownloadPathRow("图片", "${DownloadPaths.DISPLAY_ROOT} / ${DownloadPaths.PICTURES}")
                 }
+            } else if (page == SettingsPage.Tutorials) {
+                TutorialSupportContent()
             } else if (page == SettingsPage.About) {
                 GlassCard {
                     Text("关于本 APP", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
@@ -2471,6 +2595,88 @@ private fun SettingsScreen(
                         Switch(checked = autoPasteParseEnabled, onCheckedChange = onAutoPasteParseChange)
                     }
                 }
+            }
+        }
+        Spacer(Modifier.height(if (appleFloatingNav) 112.dp else 18.dp))
+    }
+}
+
+private data class TutorialSupportItem(
+    val name: String,
+    val iconRes: Int,
+    val capability: String,
+    val tutorial: String
+)
+
+@Composable
+private fun TutorialSupportContent() {
+    val items = listOf(
+        TutorialSupportItem(
+            "快手", R.drawable.icon_kuaishou,
+            "快手视频、图集、实况去水印解析",
+            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
+        ),
+        TutorialSupportItem(
+            "抖音", R.drawable.icon_douyin,
+            "抖音去水印解析，支持图文、短视频和实况解析",
+            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
+        ),
+        TutorialSupportItem(
+            "皮皮搞笑", R.drawable.icon_pipi,
+            "皮皮搞笑无水印解析",
+            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
+        ),
+        TutorialSupportItem(
+            "即梦", R.drawable.icon_jimeng,
+            "即梦 AI 视频去水印，支持隐藏和未发布的作品",
+            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
+        ),
+        TutorialSupportItem(
+            "豆包", R.drawable.icon_doubao,
+            "豆包对话生图、视频去水印解析",
+            "长按豆包生成的视频或者图片对话，选择“分享”，选择“分享链接”，回到本 APP 解析即可"
+        ),
+        TutorialSupportItem(
+            "微信", R.drawable.icon_wechat,
+            "微信视频号解析",
+            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
+        )
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(
+            "支持的 APP",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        items.forEach { item ->
+            GlassCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Image(
+                        painter = painterResource(item.iconRes),
+                        contentDescription = item.name,
+                        modifier = Modifier
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = buildString {
+                            append(item.name)
+                            append("（")
+                            append(item.capability)
+                            append("）")
+                        },
+                        modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    text = "教程：${item.tutorial}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

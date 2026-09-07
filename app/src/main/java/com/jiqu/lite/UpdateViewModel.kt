@@ -8,6 +8,9 @@ import android.content.pm.PackageManager
 import android.content.pm.Signature
 import android.os.Build
 import android.provider.Settings
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.net.Uri
 import android.text.Html
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,8 +33,7 @@ import java.net.URL
 import java.security.MessageDigest
 
 internal enum class UpdateSource(val displayName: String) {
-    GitHub("GitHub"),
-    Gitee("Gitee")
+    GitHub("GitHub")
 }
 
 internal data class AppUpdate(
@@ -48,6 +50,7 @@ internal sealed interface UpdateUiState {
     data object Checking : UpdateUiState
     data object UpToDate : UpdateUiState
     data class Available(val update: AppUpdate) : UpdateUiState
+    data class SelectingChannel(val update: AppUpdate) : UpdateUiState
     data class Failed(val message: String) : UpdateUiState
     data class Downloading(
         val update: AppUpdate,
@@ -77,10 +80,6 @@ internal fun isTrustedUpdateUrl(url: String): Boolean = runCatching {
     val path = uri.path.lowercase()
     when (host) {
         "github.com" -> path.startsWith("/dhvbjvvb/jiqu2/releases/download/")
-        "gitee.com" ->
-            path.startsWith("/diot486/jiqu2/releases/download/") ||
-                path.startsWith("/diot486/jiqu2/attach_files/") ||
-                path.startsWith("/api/v5/repos/diot486/jiqu2/releases/")
         else -> false
     }
 }.getOrDefault(false)
@@ -101,14 +100,11 @@ private sealed interface SourceResult {
 
 internal class ReleaseUpdateClient {
     fun checkForUpdate(currentVersion: String): Result<AppUpdate?> {
-        val releases = buildList {
-            val githubApi = checkApiSource(GITHUB_API_URL, UpdateSource.GitHub)
-            val github = if (githubApi == SourceResult.Failed) checkGitHubWeb() else githubApi
-            if (github is SourceResult.Release) add(github.update)
-
-            val gitee = checkApiSource(GITEE_API_URL, UpdateSource.Gitee)
-            if (gitee is SourceResult.Release) add(gitee.update)
-        }
+        val github = GITHUB_API_URLS.asSequence()
+            .map { checkApiSource(it, UpdateSource.GitHub) }
+            .firstOrNull { it is SourceResult.Release }
+            ?: checkGitHubWeb()
+        val releases = if (github is SourceResult.Release) listOf(github.update) else emptyList()
         if (releases.isEmpty()) return Result.failure(IllegalStateException("没有可用的更新源"))
 
         val update = releases
@@ -225,9 +221,13 @@ internal class ReleaseUpdateClient {
     private data class HttpResponse(val code: Int, val body: String, val location: String?)
 
     private companion object {
-        const val GITHUB_API_URL = "https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest"
+        // Prefer public GitHub CDN mirrors for users whose networks cannot reach GitHub reliably.
+        val GITHUB_API_URLS = listOf(
+            "https://gh-proxy.com/https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest",
+            "https://ghfast.top/https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest",
+            "https://api.github.com/repos/dhvbjvvb/JIQU2/releases/latest"
+        )
         const val GITHUB_LATEST_URL = "https://github.com/dhvbjvvb/JIQU2/releases/latest"
-        const val GITEE_API_URL = "https://gitee.com/api/v5/repos/DIOT486/JIQU2/releases/latest"
         val APK_LINK_PATTERN = Regex(
             """href=[\"']([^\"']+/releases/download/[^\"']+\.apk(?:\?[^\"']*)?)[\"']""",
             RegexOption.IGNORE_CASE
@@ -322,6 +322,26 @@ internal class UpdateViewModel(application: Application) : AndroidViewModel(appl
                 )
             }
         }
+    }
+
+    fun chooseDownloadChannel(update: AppUpdate) {
+        if (uiState !is UpdateUiState.Downloading) uiState = UpdateUiState.SelectingChannel(update)
+    }
+
+    fun selectUpdateChannel(context: Context, update: AppUpdate, useGitHub: Boolean) {
+        if (useGitHub) {
+            downloadAndInstall(context, update)
+            return
+        }
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText("蓝奏云提取码", LANZOU_PASSWORD))
+        runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, Uri.parse(LANZOU_URL))
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }
+        uiState = UpdateUiState.Hidden
     }
 
     fun resumePendingInstall(context: Context) {
@@ -452,5 +472,7 @@ internal class UpdateViewModel(application: Application) : AndroidViewModel(appl
 
     private companion object {
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
+        const val LANZOU_URL = "https://wwbjl.lanzout.com/b01d77wdje"
+        const val LANZOU_PASSWORD = "ccvd"
     }
 }

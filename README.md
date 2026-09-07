@@ -4,7 +4,7 @@
 
 ## 当前版本
 
-`2.0.5`（内部版本号：`2005`）
+`2.0.6`（内部版本号：`2006`，递增自 `2.0.5 / 2005`）
 
 ## 功能
 
@@ -14,8 +14,9 @@
 - 下载完成通知
 - 深色模式、主题色与悬浮底栏设置
 - 关于页面提供项目开源地址
-- 启动时从 GitHub / Gitee Releases 静默检查更新
-- 在应用内下载并校验签名后打开系统安装器
+- 启动时通过 CDN 加速访问 GitHub Releases 静默检查更新
+- 发现新版本后可选择 GitHub 应用内下载安装，或复制蓝奏云提取码并在浏览器手动下载
+- GitHub 应用内下载完成后会校验包名、版本号和签名，再打开系统安装器
 
 ## 构建
 
@@ -41,9 +42,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\sign-release.ps1
 
 https://github.com/dhvbjvvb/JIQU2
 
-国内镜像：
+蓝奏云更新地址：
 
-https://gitee.com/DIOT486/JIQU2
+https://wwbjl.lanzout.com/b01d77wdje（提取码：`ccvd`）
 
 ## 许可证
 
