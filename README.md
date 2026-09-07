@@ -25,7 +25,7 @@ https://github.com/dhvbjvvb/JIQU2
 
 蓝奏云更新地址：
 
-https://wwbjl.lanzout.com/b01d77wdje（提取码:ccvd）
+https://wwbjl.lanzout.com/b01d77wdje  （提取码:ccvd）
 
 ## 许可证
 
