@@ -367,8 +367,11 @@ private fun applyPreviewAspectTransform(view: TextureView, videoWidth: Int, vide
     if (videoWidth <= 0 || videoHeight <= 0 || viewWidth <= 0 || viewHeight <= 0) return
     val videoAspect = videoWidth.toFloat() / videoHeight.toFloat()
     val viewAspect = viewWidth.toFloat() / viewHeight.toFloat()
-    val scaleX = if (videoAspect < viewAspect) videoAspect / viewAspect else 1f
-    val scaleY = if (videoAspect > viewAspect) viewAspect / videoAspect else 1f
+    // Fill the preview surface while preserving the source aspect ratio. The
+    // previous fit transform introduced visible bars whenever the stream and
+    // the fixed 16:9 preview surface differed by even a small amount.
+    val scaleX = if (videoAspect > viewAspect) videoAspect / viewAspect else 1f
+    val scaleY = if (videoAspect < viewAspect) viewAspect / videoAspect else 1f
     view.setTransform(
         Matrix().apply {
             setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
@@ -1272,8 +1275,14 @@ private fun MediaPreviewWindow(
     var hasPreviewFrame by remember(previewUrl) { mutableStateOf(false) }
     var previewFailed by remember(previewUrl) { mutableStateOf(false) }
     var isPlaying by remember(previewUrl) { mutableStateOf(false) }
+    var playWhenReady by remember(previewUrl) { mutableStateOf(false) }
     var playbackPosition by remember(previewUrl) { mutableIntStateOf(0) }
     var duration by remember(previewUrl) { mutableIntStateOf(0) }
+    val previewVideoAlpha by animateFloatAsState(
+        targetValue = if (hasPreviewFrame) 1f else 0f,
+        animationSpec = tween(180),
+        label = "preview-video-alpha"
+    )
     var coverBitmap by remember(media.coverUrl) {
         mutableStateOf(media.coverUrl?.let { url -> synchronized(previewBitmapCache) { previewBitmapCache.get(url) } })
     }
@@ -1288,6 +1297,18 @@ private fun MediaPreviewWindow(
             delay(250)
         }
     }
+    // A network-backed MediaPlayer may take several seconds to prepare. Keep
+    // the user's play request and start as soon as preparation completes.
+    LaunchedEffect(previewPlayer, isPrepared, playWhenReady) {
+        if (isPrepared && playWhenReady) {
+            previewPlayer?.let { player ->
+                if (!player.isPlaying) {
+                    runCatching { player.start() }
+                    isPlaying = true
+                }
+            }
+        }
+    }
     LaunchedEffect(isActive) {
         if (!isActive) {
             previewPlayer?.let { player ->
@@ -1297,6 +1318,7 @@ private fun MediaPreviewWindow(
                 }
             }
             isPlaying = false
+            playWhenReady = false
         }
     }
 
@@ -1378,11 +1400,13 @@ private fun MediaPreviewWindow(
                                     player.setOnCompletionListener {
                                         playbackPosition = duration
                                         isPlaying = false
+                                        playWhenReady = false
                                     }
                                     player.setOnErrorListener { _, _, _ ->
                                         previewFailed = true
                                         isPrepared = false
                                         isPlaying = false
+                                        playWhenReady = false
                                         true
                                     }
                                     runCatching {
@@ -1410,26 +1434,26 @@ private fun MediaPreviewWindow(
                             }
                         }
                     },
-                    modifier = Modifier.fillMaxSize().alpha(if (hasPreviewFrame) 1f else 0f),
+                    modifier = Modifier.fillMaxSize().alpha(previewVideoAlpha),
                     onRelease = {
                         previewPlayer?.release()
                         previewPlayer = null
                     }
                 )
             }
-            if (!hasPreviewFrame) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-                    contentAlignment = Alignment.Center
-                ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .alpha(1f - previewVideoAlpha)
+                    .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                contentAlignment = Alignment.Center
+            ) {
                     coverBitmap?.let { bitmap ->
                         Image(
                             bitmap = bitmap.asImageBitmap(),
                             contentDescription = "媒体预览封面",
                             modifier = Modifier.fillMaxSize(),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Fit
+                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
                         )
                     } ?: if (previewFailed) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1455,7 +1479,6 @@ private fun MediaPreviewWindow(
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
-                }
             }
         }
         Spacer(Modifier.height(12.dp))
@@ -1463,15 +1486,17 @@ private fun MediaPreviewWindow(
         if (assets.isEmpty()) {
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-            Surface(
+                Surface(
                 onClick = {
-                    if (isPrepared) {
+                    if (!previewFailed) {
+                        playWhenReady = !playWhenReady
                         previewPlayer?.let { player ->
-                            if (player.isPlaying) {
+                            if (isPrepared && player.isPlaying) {
                                 playbackPosition = player.currentPosition
                                 player.pause()
                                 isPlaying = false
-                            } else {
+                                playWhenReady = false
+                            } else if (isPrepared) {
                                 player.start()
                                 isPlaying = true
                             }
@@ -1480,20 +1505,21 @@ private fun MediaPreviewWindow(
                 },
                 modifier = Modifier.height(38.dp),
                 shape = RoundedCornerShape(12.dp),
-                color = if (isPrepared) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-                contentColor = if (isPrepared) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                enabled = !previewFailed,
+                color = if (!previewFailed) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant,
+                contentColor = if (!previewFailed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
             ) {
                 Row(
                     modifier = Modifier.padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        imageVector = if (isPlaying) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
+                        imageVector = if (isPlaying || (playWhenReady && !isPrepared)) Icons.Outlined.Pause else Icons.Outlined.PlayArrow,
                         contentDescription = null,
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(Modifier.width(5.dp))
-                    Text(if (isPlaying) "暂停" else "播放", style = MaterialTheme.typography.labelLarge)
+                    Text(if (isPlaying || (playWhenReady && !isPrepared)) "暂停" else "播放", style = MaterialTheme.typography.labelLarge)
                 }
             }
             Spacer(Modifier.width(10.dp))
