@@ -23,8 +23,8 @@ android {
         minSdk = 31
         targetSdk = 36
         // Keep this above APP/03's 1508 so the update is accepted as an upgrade.
-        versionCode = 2009
-        versionName = "2.0.9"
+        versionCode = 2010
+        versionName = "2.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

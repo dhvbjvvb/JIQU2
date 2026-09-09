@@ -19,14 +19,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.work.Constraints
-import androidx.work.BackoffPolicy
-import androidx.work.Data
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkInfo
-import androidx.work.WorkManager
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -47,7 +39,6 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.util.UUID
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
@@ -81,7 +72,6 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
 
     private var downloading = false
     private val pendingRequests = ArrayDeque<DownloadRequest>()
-    private val workManager = WorkManager.getInstance(application)
 
     fun start(request: DownloadRequest) {
         if (downloading) {
@@ -90,46 +80,24 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
         }
         downloading = true
         uiState = DownloadUiState.Preparing(request.fileName)
-        val input = Data.Builder()
-            .putString(DownloadWorker.KEY_URL, request.url)
-            .putString(DownloadWorker.KEY_FILE_NAME, request.fileName)
-            .putString(DownloadWorker.KEY_EXTENSION, request.extension)
-            .putLong(DownloadWorker.KEY_EXPECTED_SIZE, request.expectedSizeBytes ?: -1L)
-            .putString(DownloadWorker.KEY_TARGET_FOLDER, request.targetFolder)
-            .build()
-        val workRequest = OneTimeWorkRequestBuilder<DownloadWorker>()
-            .setInputData(input)
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 10, TimeUnit.SECONDS)
-            .addTag(DownloadWorker.TAG)
-            .build()
-        workManager.enqueue(workRequest)
         viewModelScope.launch {
-            workManager.getWorkInfoByIdFlow(workRequest.id).collectLatest { info ->
-                info ?: return@collectLatest
-                val progress = info.progress
-                val downloaded = progress.getLong(DownloadWorker.KEY_DOWNLOADED, 0L)
-                val total = progress.getLong(DownloadWorker.KEY_TOTAL, 0L)
-                val threads = progress.getInt(DownloadWorker.KEY_THREADS, 1)
-                if (info.state == WorkInfo.State.RUNNING) {
-                    uiState = DownloadUiState.Running(request.fileName, downloaded, total, threads)
-                }
-                if (info.state.isFinished) {
-                    // Clear progress notifications left by earlier app versions before showing completion.
-                    getApplication<Application>().getSystemService(NotificationManager::class.java)
-                        ?.cancel(request.fileName.hashCode())
-                    if (info.state == WorkInfo.State.SUCCEEDED) {
-                        uiState = DownloadUiState.Success(request.fileName)
-                        showCompletedNotification(request.fileName)
-                    } else {
-                        uiState = DownloadUiState.Failure(
-                            fileName = request.fileName,
-                            message = info.outputData.getString(DownloadWorker.KEY_ERROR) ?: "下载失败，请稍后重试"
-                        )
+            try {
+                MultipartDownloader(getApplication<Application>()).download(request) { downloaded, total, threads ->
+                    withContext(Dispatchers.Main.immediate) {
+                        uiState = DownloadUiState.Running(request.fileName, downloaded, total, threads)
                     }
-                    downloading = false
-                    pendingRequests.removeFirstOrNull()?.let(::start)
                 }
+                uiState = DownloadUiState.Success(request.fileName)
+                showCompletedNotification(request.fileName)
+            } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                uiState = DownloadUiState.Failure(
+                    fileName = request.fileName,
+                    message = error.message ?: "下载失败，请稍后重试"
+                )
+            } finally {
+                downloading = false
+                pendingRequests.removeFirstOrNull()?.let(::start)
             }
         }
     }
@@ -206,7 +174,10 @@ internal class MultipartDownloader(private val application: Context) {
         try {
             val remoteInfo = inspectRemoteFile(request.url, request.expectedSizeBytes)
             val totalBytes = remoteInfo.totalBytes
-            val ranges = if (remoteInfo.supportsRanges && totalBytes > 0) {
+            // Some media CDNs advertise byte ranges but return 200 for a request
+            // covering the complete file. Use the normal stream path for small
+            // files so that this response is handled correctly.
+            val ranges = if (remoteInfo.supportsRanges && totalBytes > SMALL_FILE_BYTES) {
                 calculateByteRanges(totalBytes).map { ByteRange(it.first, it.last) }
             } else {
                 emptyList()
@@ -227,7 +198,16 @@ internal class MultipartDownloader(private val application: Context) {
             if (ranges.isEmpty()) {
                 downloadSingle(request.url, stagingFile, totalBytes, transferProgress)
             } else {
-                downloadParts(request.url, stagingFile, ranges, totalBytes, transferProgress)
+                try {
+                    downloadParts(request.url, stagingFile, ranges, totalBytes, transferProgress)
+                } catch (error: Throwable) {
+                    if (!error.canFallbackToSingleStream()) throw error
+                    // A CDN can advertise ranges during probing but return a full
+                    // 200 response for actual slices. Restart as one stream.
+                    stagingFile.delete()
+                    transferProgress(0L, totalBytes, 1)
+                    downloadSingle(request.url, stagingFile, totalBytes, transferProgress)
+                }
             }
 
             saveToDownloads(stagingFile, request)
@@ -328,6 +308,10 @@ internal class MultipartDownloader(private val application: Context) {
         }
         throw IOException("分片下载重试后仍然失败", lastError)
     }
+
+    private fun Throwable.canFallbackToSingleStream(): Boolean =
+        this !is kotlinx.coroutines.CancellationException &&
+            (this is IOException || this is IllegalStateException || cause?.canFallbackToSingleStream() == true)
 
     private suspend fun downloadSingle(
         url: String,

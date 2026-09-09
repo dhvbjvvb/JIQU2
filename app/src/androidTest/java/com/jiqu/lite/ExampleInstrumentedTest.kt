@@ -1,5 +1,6 @@
 package com.jiqu.lite
 
+import android.provider.MediaStore
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasSetTextAction
@@ -52,6 +53,15 @@ class ExampleInstrumentedTest {
     }
 
     @Test
+    fun parsesBugPkDouyinWithoutLegacyCredentials() = runBlocking {
+        val media = parseMediaUrl("https://v.douyin.com/eEEfBw-3-pQ/").getOrThrow()
+
+        assertEquals("douyin", media.platform)
+        assertTrue(media.downloadUrl.startsWith("http"))
+        assertTrue(media.downloadOptions.isNotEmpty())
+    }
+
+    @Test
     fun parsesWechatChannelsThroughDedicatedGateway() = runBlocking {
         val media = parseMediaUrl("https://weixin.qq.com/sph/AoPX5bEBDd").getOrThrow()
 
@@ -62,6 +72,38 @@ class ExampleInstrumentedTest {
         assertTrue(media.downloadOptions.isNotEmpty())
         assertTrue((media.sizeBytes ?: 0) > 0)
         assertTrue(media.downloadOptions.all { (it.sizeBytes ?: 0) > 0 })
+    }
+
+    @Test
+    fun downloadsWechatChannelsMediaToMediaStore() {
+        runBlocking {
+            val media = parseMediaUrl("https://weixin.qq.com/sph/AXXRx9senB").getOrThrow()
+            val fileName = "android_test_wechat_${System.currentTimeMillis()}"
+            val progress = mutableListOf<Long>()
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+
+            MultipartDownloader(context).download(
+                DownloadRequest(
+                    url = media.downloadUrl,
+                    fileName = fileName,
+                    extension = media.fileExtension,
+                    expectedSizeBytes = media.sizeBytes
+                )
+            ) { downloaded, _, _ ->
+                progress += downloaded
+            }
+
+            assertTrue("download progress was never reported", progress.isNotEmpty())
+            context.contentResolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                arrayOf("$fileName.${media.fileExtension}"),
+                null
+            )?.use { cursor ->
+                assertTrue("downloaded file was not written to MediaStore", cursor.moveToFirst())
+            }
+        }
     }
 
     @Test
@@ -104,5 +146,22 @@ class ExampleInstrumentedTest {
             composeRule.onAllNodesWithText("选择下载清晰度").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("选择下载清晰度").assertIsDisplayed()
+    }
+
+    @Test
+    fun settingsTutorialsListLegacyPlatforms() {
+        composeRule.onNodeWithText("设置").performClick()
+        composeRule.onNodeWithText("解析教程与支持").performClick()
+
+        listOf(
+            "皮皮虾（皮皮虾无水印视频）",
+            "小红书（无水印解析小红书视频和图文）",
+            "最右（无水印解析最右视频）",
+            "今日头条（无水印解析今日头条短视频）"
+        ).forEach { title ->
+            composeRule.onNodeWithText(title).assertIsDisplayed()
+        }
+        composeRule.onAllNodesWithText("教程：复制 App 内的分享链接，回到本 APP 粘贴解析即可")
+            .assertCountEquals(9)
     }
 }

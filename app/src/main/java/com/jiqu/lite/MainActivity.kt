@@ -104,6 +104,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -166,6 +167,7 @@ import com.jiqu.lite.ui.theme.JiquTheme
 import com.jiqu.lite.data.ParsedMedia
 import com.jiqu.lite.data.MediaDownloadOption
 import com.jiqu.lite.data.MediaAsset
+import com.jiqu.lite.data.ParsePhase
 import com.jiqu.lite.data.isSupportedMediaUrl
 import com.jiqu.lite.data.normalizeMediaSourceUrl
 import coil.compose.AsyncImage
@@ -322,6 +324,7 @@ private fun platformDisplayName(platform: String): String = when (platform.lower
     "xigua", "ixigua", "西瓜视频" -> "西瓜视频"
     "toutiao", "今日头条" -> "今日头条"
     "pipixia", "皮皮虾" -> "皮皮虾"
+    "zuiyou", "最右" -> "最右"
     "doubao", "豆包" -> "豆包"
     "jimeng", "即梦" -> "即梦"
     "pipigx", "皮皮搞笑" -> "皮皮搞笑"
@@ -738,24 +741,27 @@ private fun JiquApp(
     val context = LocalContext.current
     val lifecycle = (context as? ComponentActivity)?.lifecycle
     val clipboardManager = context.getSystemService(ClipboardManager::class.java)
-    var lastAutoParsedUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    val latestParsing by rememberUpdatedState(parseUiState.parsing)
+    val latestOnSourceUrlChange by rememberUpdatedState(onSourceUrlChange)
+    val latestOnParse by rememberUpdatedState(onParse)
+    var lastAutoParsedUrl by remember { mutableStateOf<String?>(null) }
+    fun readClipboardUrl(): String? = clipboardManager?.primaryClip
+        ?.getItemAt(0)
+        ?.coerceToText(context)
+        ?.toString()
+        ?.let(::extractHttpUrl)
 
     DisposableEffect(clipboardManager, lifecycle, autoPasteParseEnabled, parseUiState.parsing) {
         if (clipboardManager == null || lifecycle == null) {
             onDispose { }
         } else {
             fun parseClipboardUrl() {
-                if (!autoPasteParseEnabled || parseUiState.parsing) return
-                val text = clipboardManager.primaryClip
-                    ?.getItemAt(0)
-                    ?.coerceToText(context)
-                    ?.toString()
-                    .orEmpty()
-                val url = extractHttpUrl(text)?.takeIf(::isSupportedMediaUrl) ?: return
+                if (!autoPasteParseEnabled || latestParsing) return
+                val url = readClipboardUrl()?.takeIf(::isSupportedMediaUrl) ?: return
                 if (url == lastAutoParsedUrl) return
                 lastAutoParsedUrl = url
-                onSourceUrlChange(url)
-                onParse(url)
+                latestOnSourceUrlChange(url)
+                latestOnParse(url)
                 destinationName = AppDestination.Parse.name
             }
             val listener = ClipboardManager.OnPrimaryClipChangedListener { parseClipboardUrl() }
@@ -777,16 +783,11 @@ private fun JiquApp(
         if (autoPasteParseEnabled) {
             delay(800)
             if (!parseUiState.parsing && destinationName == AppDestination.Parse.name) {
-                val text = clipboardManager?.primaryClip
-                    ?.getItemAt(0)
-                    ?.coerceToText(context)
-                    ?.toString()
-                    .orEmpty()
-                val url = extractHttpUrl(text)?.takeIf(::isSupportedMediaUrl)
+                val url = readClipboardUrl()?.takeIf(::isSupportedMediaUrl)
                 if (url != null && url != lastAutoParsedUrl) {
                     lastAutoParsedUrl = url
-                    onSourceUrlChange(url)
-                    onParse(url)
+                    latestOnSourceUrlChange(url)
+                    latestOnParse(url)
                 }
             }
         }
@@ -933,19 +934,6 @@ private fun ParseScreen(
 ) {
     val context = LocalContext.current
     val clipboardManager = context.getSystemService(ClipboardManager::class.java)
-    val parseStages = remember {
-        listOf("正在连接解析服务", "正在提取媒体信息", "正在准备预览")
-    }
-    var parseStageIndex by rememberSaveable { mutableIntStateOf(0) }
-    LaunchedEffect(state.parsing) {
-        if (state.parsing) {
-            parseStageIndex = 0
-            while (true) {
-                delay(900)
-                parseStageIndex = (parseStageIndex + 1) % parseStages.size
-            }
-        }
-    }
     Column(
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 0.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -966,6 +954,7 @@ private fun ParseScreen(
                             .orEmpty()
                         extractHttpUrl(clipboardText)?.let { url ->
                             onSourceUrlChange(url)
+                            if (isSupportedMediaUrl(url)) onParse(url)
                         }
                     },
                     enabled = !state.parsing,
@@ -1027,7 +1016,13 @@ private fun ParseScreen(
             enter = fadeIn() + scaleIn(initialScale = 0.98f),
             exit = fadeOut()
         ) {
-            ParseLoadingCard(parseStages[parseStageIndex])
+            ParseLoadingCard(
+                when (state.parsePhase) {
+                    ParsePhase.EXTRACTING -> "正在提取媒体信息"
+                    ParsePhase.CONNECTING -> "正在连接解析服务"
+                    null -> "正在解析媒体信息"
+                }
+            )
         }
         AnimatedVisibility(
             visible = state.parsedMedia != null,
@@ -1056,13 +1051,6 @@ private fun AppHeader(title: String, subtitle: String? = null) {
 
 @Composable
 private fun ParseLoadingCard(stage: String) {
-    val transition = rememberInfiniteTransition(label = "parse-skeleton")
-    val skeletonAlpha by transition.animateFloat(
-        initialValue = 0.42f,
-        targetValue = 0.82f,
-        animationSpec = infiniteRepeatable(tween(750), RepeatMode.Reverse),
-        label = "parse-skeleton-alpha"
-    )
     GlassCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(
@@ -1074,7 +1062,7 @@ private fun ParseLoadingCard(stage: String) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(stage, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
                 Spacer(Modifier.height(4.dp))
-                Text("正在加载媒体预览，请稍候", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("等待解析服务返回真实结果", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         Spacer(Modifier.height(14.dp))
@@ -1083,7 +1071,7 @@ private fun ParseLoadingCard(stage: String) {
                 .fillMaxWidth()
                 .height(12.dp)
                 .clip(RoundedCornerShape(6.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = skeletonAlpha))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1093,7 +1081,7 @@ private fun ParseLoadingCard(stage: String) {
                         .weight(1f)
                         .aspectRatio(1.25f)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = skeletonAlpha))
+                        .background(MaterialTheme.colorScheme.surfaceVariant)
                 )
             }
         }
@@ -1282,6 +1270,8 @@ private fun MediaPreviewWindow(
     var previewFailed by remember(previewUrl) { mutableStateOf(false) }
     var isPlaying by remember(previewUrl) { mutableStateOf(false) }
     var playWhenReady by remember(previewUrl) { mutableStateOf(false) }
+    var isSeeking by remember(previewUrl) { mutableStateOf(false) }
+    var pendingSeekPosition by remember(previewUrl) { mutableIntStateOf(-1) }
     var playbackPosition by remember(previewUrl) { mutableIntStateOf(0) }
     var duration by remember(previewUrl) {
         mutableIntStateOf(media.durationMs?.toInt()?.coerceAtLeast(0) ?: 0)
@@ -1299,8 +1289,8 @@ private fun MediaPreviewWindow(
         coverBitmap = withContext(Dispatchers.IO) { loadPreviewBitmap(media.coverUrl) }
     }
 
-    LaunchedEffect(previewPlayer, isPrepared, isPlaying) {
-        while (isPrepared && isPlaying) {
+    LaunchedEffect(previewPlayer, isPrepared, isPlaying, isSeeking) {
+        while (isPrepared && isPlaying && !isSeeking) {
             playbackPosition = previewPlayer?.currentPosition ?: playbackPosition
             delay(250)
         }
@@ -1407,7 +1397,14 @@ private fun MediaPreviewWindow(
                                             player.videoWidth,
                                             player.videoHeight
                                         )
-                                        player.setOnSeekCompleteListener { hasPreviewFrame = true }
+                                        player.setOnSeekCompleteListener {
+                                            hasPreviewFrame = true
+                                            if (pendingSeekPosition >= 0) {
+                                                playbackPosition = pendingSeekPosition
+                                                pendingSeekPosition = -1
+                                                isSeeking = false
+                                            }
+                                        }
                                         player.seekTo(1, MediaPlayer.SEEK_CLOSEST)
                                     }
                                     player.setOnVideoSizeChangedListener { _, width, height ->
@@ -1477,14 +1474,7 @@ private fun MediaPreviewWindow(
                     .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                 contentAlignment = Alignment.Center
             ) {
-                    coverBitmap?.let { bitmap ->
-                        Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "媒体预览封面",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = androidx.compose.ui.layout.ContentScale.Crop
-                        )
-                    } ?: if (previewFailed) {
+                    if (previewFailed) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Icon(
                                 Icons.Outlined.PlayArrow,
@@ -1500,13 +1490,38 @@ private fun MediaPreviewWindow(
                             )
                         }
                     } else {
-                        CircularProgressIndicator(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .semantics { contentDescription = "预览加载中" },
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        coverBitmap?.let { bitmap ->
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "媒体预览封面",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                            )
+                        }
+                        if (!hasPreviewFrame) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(Color.Black.copy(alpha = 0.18f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier
+                                            .size(28.dp)
+                                            .semantics { contentDescription = "预览加载中" },
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(
+                                        if (isPrepared) "正在等待视频首帧" else "正在连接媒体流",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = Color.White
+                                    )
+                                }
+                            }
+                        }
                     }
             }
         }
@@ -1561,8 +1576,20 @@ private fun MediaPreviewWindow(
             Slider(
                 value = playbackPosition.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                 onValueChange = { position ->
+                    isSeeking = true
                     playbackPosition = position.toInt().coerceIn(0, duration)
-                    previewPlayer?.seekTo(playbackPosition)
+                },
+                onValueChangeFinished = {
+                    previewPlayer?.let { player ->
+                        pendingSeekPosition = playbackPosition
+                        isSeeking = true
+                        runCatching {
+                            player.seekTo(playbackPosition.toLong(), MediaPlayer.SEEK_CLOSEST)
+                        }.onFailure {
+                            pendingSeekPosition = -1
+                            isSeeking = false
+                        }
+                    }
                 },
                 valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
                 enabled = isPrepared,
@@ -2231,6 +2258,7 @@ private fun AudioPreviewCard(audioUrl: String, onDownload: () -> Unit) {
     var mediaPlayer by remember(audioUrl) { mutableStateOf<MediaPlayer?>(null) }
     var isPrepared by remember(audioUrl) { mutableStateOf(false) }
     var isPlaying by remember(audioUrl) { mutableStateOf(false) }
+    var isSeeking by remember(audioUrl) { mutableStateOf(false) }
     var playbackPosition by remember(audioUrl) { mutableIntStateOf(0) }
     var duration by remember(audioUrl) { mutableIntStateOf(0) }
 
@@ -2259,8 +2287,8 @@ private fun AudioPreviewCard(audioUrl: String, onDownload: () -> Unit) {
         }
     }
 
-    LaunchedEffect(mediaPlayer, isPrepared, isPlaying) {
-        while (isPrepared && isPlaying) {
+    LaunchedEffect(mediaPlayer, isPrepared, isPlaying, isSeeking) {
+        while (isPrepared && isPlaying && !isSeeking) {
             playbackPosition = mediaPlayer?.currentPosition ?: playbackPosition
             delay(250)
         }
@@ -2315,8 +2343,14 @@ private fun AudioPreviewCard(audioUrl: String, onDownload: () -> Unit) {
             Slider(
                 value = playbackPosition.toFloat().coerceIn(0f, duration.toFloat().coerceAtLeast(1f)),
                 onValueChange = { position ->
+                    isSeeking = true
                     playbackPosition = position.toInt().coerceIn(0, duration)
-                    mediaPlayer?.seekTo(playbackPosition)
+                },
+                onValueChangeFinished = {
+                    mediaPlayer?.let { player ->
+                        runCatching { player.seekTo(playbackPosition.toLong(), MediaPlayer.SEEK_CLOSEST) }
+                    }
+                    isSeeking = false
                 },
                 valueRange = 0f..duration.toFloat().coerceAtLeast(1f),
                 enabled = isPrepared,
@@ -2718,47 +2752,80 @@ private data class TutorialSupportItem(
     val tutorial: String
 )
 
+private const val SHARE_LINK_TUTORIAL = "复制 App 内的分享链接，回到本 APP 粘贴解析即可"
+
+private val tutorialSupportItems = listOf(
+    TutorialSupportItem(
+        name = "皮皮虾",
+        iconRes = R.drawable.icon_pipixia,
+        capability = "皮皮虾无水印视频",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "小红书",
+        iconRes = R.drawable.icon_xiaohongshu,
+        capability = "无水印解析小红书视频和图文",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "最右",
+        iconRes = R.drawable.icon_zuiyou,
+        capability = "无水印解析最右视频",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "今日头条",
+        iconRes = R.drawable.icon_toutiao,
+        capability = "无水印解析今日头条短视频",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "快手",
+        iconRes = R.drawable.icon_kuaishou,
+        capability = "快手视频、图集、实况去水印解析",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "抖音",
+        iconRes = R.drawable.icon_douyin,
+        capability = "抖音去水印解析，支持图文、短视频和实况解析",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "皮皮搞笑",
+        iconRes = R.drawable.icon_pipi,
+        capability = "皮皮搞笑无水印解析",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "即梦",
+        iconRes = R.drawable.icon_jimeng,
+        capability = "即梦 AI 视频去水印，支持隐藏和未发布的作品",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
+    TutorialSupportItem(
+        name = "豆包",
+        iconRes = R.drawable.icon_doubao,
+        capability = "豆包对话生图、视频去水印解析",
+        tutorial = "长按豆包生成的视频或者图片对话，选择“分享”，选择“分享链接”，回到本 APP 解析即可"
+    ),
+    TutorialSupportItem(
+        name = "微信视频号",
+        iconRes = R.drawable.icon_wechat,
+        capability = "微信视频号解析",
+        tutorial = SHARE_LINK_TUTORIAL
+    )
+)
+
 @Composable
 private fun TutorialSupportContent() {
-    val items = listOf(
-        TutorialSupportItem(
-            "快手", R.drawable.icon_kuaishou,
-            "快手视频、图集、实况去水印解析",
-            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
-        ),
-        TutorialSupportItem(
-            "抖音", R.drawable.icon_douyin,
-            "抖音去水印解析，支持图文、短视频和实况解析",
-            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
-        ),
-        TutorialSupportItem(
-            "皮皮搞笑", R.drawable.icon_pipi,
-            "皮皮搞笑无水印解析",
-            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
-        ),
-        TutorialSupportItem(
-            "即梦", R.drawable.icon_jimeng,
-            "即梦 AI 视频去水印，支持隐藏和未发布的作品",
-            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
-        ),
-        TutorialSupportItem(
-            "豆包", R.drawable.icon_doubao,
-            "豆包对话生图、视频去水印解析",
-            "长按豆包生成的视频或者图片对话，选择“分享”，选择“分享链接”，回到本 APP 解析即可"
-        ),
-        TutorialSupportItem(
-            "微信", R.drawable.icon_wechat,
-            "微信视频号解析",
-            "复制 APP 内的分享链接，回到本 APP 粘贴解析即可"
-        )
-    )
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
             "支持的 APP",
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface
         )
-        items.forEach { item ->
+        tutorialSupportItems.forEach { item ->
             GlassCard {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Image(

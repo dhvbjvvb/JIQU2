@@ -62,6 +62,12 @@ data class MediaAsset(
     val isLive: Boolean = false
 )
 
+enum class ParsePhase {
+    CONNECTING,
+    EXTRACTING
+}
+
+private const val BUGPK_API_BASE = "https://api.bugpk.com/api/"
 private const val DOUYIN_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/dyjx"
 private const val WECHAT_CHANNELS_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/wxsph"
 private const val KUAISHOU_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/ksjx"
@@ -76,8 +82,10 @@ private data class CachedParse(val media: ParsedMedia, val cachedAt: Long)
 
 internal fun isDouyinUrl(sourceUrl: String): Boolean {
     val host = runCatching { URL(sourceUrl).host.lowercase() }.getOrDefault("")
-    return host == "douyin.com" || host.endsWith(".douyin.com") ||
+    return host != "qishui.douyin.com" &&
+        (host == "douyin.com" || host.endsWith(".douyin.com") ||
         host == "iesdouyin.com" || host.endsWith(".iesdouyin.com")
+        )
 }
 
 internal fun normalizeMediaSourceUrl(sourceUrl: String): String = sourceUrl
@@ -100,17 +108,30 @@ internal fun isKuaishouUrl(sourceUrl: String): Boolean {
     return host == "kuaishou.com" || host.endsWith(".kuaishou.com") ||
         host == "kwai.com" || host.endsWith(".kwai.com")
 }
-internal fun isDoubaoUrl(sourceUrl: String): Boolean = sourceUrl.contains("doubao.com", ignoreCase = true)
-internal fun isJimengUrl(sourceUrl: String): Boolean = sourceUrl.contains("jimeng.jianying.com", ignoreCase = true) || sourceUrl.contains("dreamina", ignoreCase = true)
-internal fun isPipigxUrl(sourceUrl: String): Boolean = sourceUrl.contains("pipigx.com", ignoreCase = true)
+private fun hasHost(sourceUrl: String, vararg hosts: String): Boolean {
+    val host = runCatching { URL(sourceUrl).host.lowercase() }.getOrDefault("")
+    return hosts.any { host == it || host.endsWith(".$it") }
+}
 
-private enum class MediaPlatform(val displayName: String) {
-    DOUYIN("douyin"),
-    WECHAT_CHANNELS("微信视频号"),
-    KUAISHOU("快手"),
-    DOUBAO("豆包"),
-    JIMENG("即梦"),
-    PIPIGX("皮皮搞笑")
+internal fun isDoubaoUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "doubao.com")
+internal fun isJimengUrl(sourceUrl: String): Boolean =
+    hasHost(sourceUrl, "jimeng.jianying.com", "dreamina.com")
+internal fun isPipigxUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "pipigx.com")
+internal fun isPipixiaUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "pipix.com", "pipixia.com")
+internal fun isXiaohongshuUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "xiaohongshu.com", "xhslink.com")
+internal fun isZuiyouUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "izuiyou.com", "xiaochuankeji.cn")
+internal fun isToutiaoUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "toutiao.com", "toutiaovod.com")
+private enum class MediaPlatform(val displayName: String, val requiresApiKey: Boolean = false) {
+    DOUYIN("douyin", true),
+    WECHAT_CHANNELS("微信视频号", true),
+    KUAISHOU("快手", true),
+    DOUBAO("豆包", true),
+    JIMENG("即梦", true),
+    PIPIGX("皮皮搞笑", true),
+    PIPIXIA("皮皮虾"),
+    XIAOHONGSHU("小红书"),
+    ZUIYOU("最右"),
+    TOUTIAO("今日头条")
 }
 
 private fun mediaPlatformForUrl(sourceUrl: String): MediaPlatform? = when {
@@ -120,16 +141,23 @@ private fun mediaPlatformForUrl(sourceUrl: String): MediaPlatform? = when {
     isDoubaoUrl(sourceUrl) -> MediaPlatform.DOUBAO
     isJimengUrl(sourceUrl) -> MediaPlatform.JIMENG
     isPipigxUrl(sourceUrl) -> MediaPlatform.PIPIGX
+    isPipixiaUrl(sourceUrl) -> MediaPlatform.PIPIXIA
+    isXiaohongshuUrl(sourceUrl) -> MediaPlatform.XIAOHONGSHU
+    isZuiyouUrl(sourceUrl) -> MediaPlatform.ZUIYOU
+    isToutiaoUrl(sourceUrl) -> MediaPlatform.TOUTIAO
     else -> null
 }
 
 internal fun isSupportedMediaUrl(sourceUrl: String): Boolean = mediaPlatformForUrl(sourceUrl) != null
 
-suspend fun parseMediaUrl(sourceUrl: String): Result<ParsedMedia> = coroutineScope {
+suspend fun parseMediaUrl(
+    sourceUrl: String,
+    onPhase: suspend (ParsePhase) -> Unit = {}
+): Result<ParsedMedia> = coroutineScope {
     val normalizedSourceUrl = normalizeMediaSourceUrl(sourceUrl)
     val request = parseInFlightMutex.withLock {
         parseInFlight[normalizedSourceUrl]
-            ?: parseRequestScope.async { parseMediaUrlInternal(normalizedSourceUrl) }
+            ?: parseRequestScope.async { parseMediaUrlInternal(normalizedSourceUrl, onPhase) }
                 .also { parseInFlight[normalizedSourceUrl] = it }
     }
     try {
@@ -141,29 +169,36 @@ suspend fun parseMediaUrl(sourceUrl: String): Result<ParsedMedia> = coroutineSco
     }
 }
 
-private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<ParsedMedia> = withContext(Dispatchers.IO) {
+private suspend fun parseMediaUrlInternal(
+    normalizedSourceUrl: String,
+    onPhase: suspend (ParsePhase) -> Unit
+): Result<ParsedMedia> = withContext(Dispatchers.IO) {
     runCatching {
         require(normalizedSourceUrl.startsWith("http://") || normalizedSourceUrl.startsWith("https://")) { "请输入有效链接" }
         val platform = mediaPlatformForUrl(normalizedSourceUrl)
-        require(platform != null) { "目前仅支持抖音、微信视频号、快手、豆包、即梦和皮皮搞笑链接" }
-        check(BuildConfig.DOUYIN_API_KEY.isNotBlank()) { "未配置解析密钥" }
+        require(platform != null) { "暂不支持该平台链接" }
+        if (platform.requiresApiKey) {
+            check(BuildConfig.DOUYIN_API_KEY.isNotBlank()) { "未配置解析密钥" }
+        }
         synchronized(parseCache) {
             parseCache[normalizedSourceUrl]
                 ?.takeIf { System.currentTimeMillis() - it.cachedAt < PARSE_CACHE_DURATION_MS }
                 ?.media
         }?.let { return@runCatching it }
 
+        onPhase(ParsePhase.CONNECTING)
         val apiSourceUrl = if (platform == MediaPlatform.DOUYIN) {
             canonicalizeDouyinSourceUrl(normalizedSourceUrl)
         } else {
             normalizedSourceUrl
         }
         val apiSourceUrls = listOf(apiSourceUrl, normalizedSourceUrl).distinct()
-        val candidates = coroutineScope {
+        val candidateResults = coroutineScope {
             List(PARSE_SAMPLE_COUNT) {
                 async(Dispatchers.IO) {
                     runCatching {
                         val root = requestParseResultWithRetry(apiSourceUrls, platform!!)
+                        onPhase(ParsePhase.EXTRACTING)
                         val data = root.optJSONObject("data") ?: throw IllegalStateException("解析结果为空")
                         val durationMs = mediaDurationMs(data)
                         val defaultFormat = data.optString("format").ifBlank { "mp4" }
@@ -174,17 +209,17 @@ private suspend fun parseMediaUrlInternal(normalizedSourceUrl: String): Result<P
                         )
                     }
                 }
-            }.awaitAll().mapNotNull { it.getOrNull() }
+            }.awaitAll()
         }
-        if (candidates.isEmpty()) throw IllegalStateException("解析服务暂时不可用")
-        // Probe every unique address before quality merging. API-provided sizes can be
-        // stale or belong to a lower-quality variant, especially for "原画" URLs.
-        val uniqueOptions = candidates.flatMap { it.options }.distinctBy { it.downloadUrl }
-        val sizedOptions = enrichDownloadOptionSizes(uniqueOptions)
-        val sizedByUrl = sizedOptions.associateBy { it.downloadUrl }
-        val sizedCandidates = candidates.map { candidate ->
-            candidate.copy(options = candidate.options.map { sizedByUrl[it.downloadUrl] ?: it })
+        val candidates = candidateResults.mapNotNull { it.getOrNull() }
+        if (candidates.isEmpty()) {
+            throw candidateResults.mapNotNull { it.exceptionOrNull() }.lastOrNull()
+                ?: IllegalStateException("解析服务暂时不可用")
         }
+        // The resolver already provides the media metadata. Avoid probing every
+        // signed CDN URL before showing the result; that turns a fast API call
+        // into several extra network round trips.
+        val sizedCandidates = candidates
         val bestCandidate = sizedCandidates.maxByOrNull { candidateQuality(it.options) }!!
         val root = bestCandidate.root
         val data = bestCandidate.data
@@ -315,7 +350,7 @@ private fun buildMediaAssets(
     return assets
 }
 
-private const val PARSE_SAMPLE_COUNT = 2
+private const val PARSE_SAMPLE_COUNT = 1
 private const val PARSE_ATTEMPT_COUNT = 3
 
 private data class ParseCandidate(
@@ -497,8 +532,11 @@ private fun buildDownloadOptions(
         } else {
             sizeBytes
         }
+        val normalizedQuality = quality.ifBlank { "高清" }
+            .replace("original", "原画", ignoreCase = true)
+            .replace("origin", "原画", ignoreCase = true)
         val candidate = MediaDownloadOption(
-            quality = quality.ifBlank { "高清" },
+            quality = normalizedQuality,
             width = width,
             height = height,
             bitRate = bitRate,
@@ -692,10 +730,16 @@ private fun requestParseResult(sourceUrl: String, platform: MediaPlatform): JSON
         MediaPlatform.DOUBAO -> "https://api-new.ifphp.com/api/doubao"
         MediaPlatform.JIMENG -> "https://api-new.ifphp.com/api/jimeng"
         MediaPlatform.PIPIGX -> "https://api-new.ifphp.com/api/pipigx"
+        MediaPlatform.PIPIXIA -> "${BUGPK_API_BASE}pipixia"
+        MediaPlatform.XIAOHONGSHU -> "${BUGPK_API_BASE}xhsjx"
+        MediaPlatform.ZUIYOU -> "${BUGPK_API_BASE}zuiyou"
+        MediaPlatform.TOUTIAO -> "${BUGPK_API_BASE}toutiao"
     }
     val encodedUrl = URLEncoder.encode(sourceUrl, Charsets.UTF_8.name())
     val encodedKey = URLEncoder.encode(BuildConfig.DOUYIN_API_KEY, Charsets.UTF_8.name())
-    val requestUrl = if (platform == MediaPlatform.DOUYIN) {
+    // The new BugPk documentation endpoints accept the share URL directly. The
+    // legacy bp_live key is for the old gateway and is rejected by these routes.
+    val requestUrl = if (endpoint.startsWith(BUGPK_API_BASE)) {
         "$endpoint?url=$encodedUrl"
     } else {
         "$endpoint?url=$encodedUrl&key=$encodedKey"
@@ -705,7 +749,9 @@ private fun requestParseResult(sourceUrl: String, platform: MediaPlatform): JSON
         connectTimeout = 8_000
         readTimeout = 12_000
         setRequestProperty("Accept", "application/json")
-        setRequestProperty("X-API-Key", BuildConfig.DOUYIN_API_KEY)
+        if (!endpoint.startsWith(BUGPK_API_BASE)) {
+            setRequestProperty("X-API-Key", BuildConfig.DOUYIN_API_KEY)
+        }
     }
     try {
         val responseCode = connection.responseCode
@@ -724,9 +770,6 @@ private fun requestParseResult(sourceUrl: String, platform: MediaPlatform): JSON
                     .ifBlank { root.optString("message") }
                     .ifBlank { "${platform.displayName}解析服务暂时不可用 ($responseCode)" }
             )
-        }
-        if (platform == MediaPlatform.DOUYIN) {
-            root.optJSONObject("data")?.let(::upgradeDouyinOriginalStream)
         }
         return root
     } finally {

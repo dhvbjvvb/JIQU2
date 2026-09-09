@@ -1,7 +1,12 @@
 package com.jiqu.lite
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
+import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
+import androidx.work.ForegroundInfo
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import java.io.IOException
@@ -10,6 +15,32 @@ internal class DownloadWorker(
     appContext: Context,
     workerParams: WorkerParameters
 ) : CoroutineWorker(appContext, workerParams) {
+    override suspend fun getForegroundInfo(): ForegroundInfo {
+        val manager = applicationContext.getSystemService(NotificationManager::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(
+                NotificationChannel(
+                    DOWNLOAD_CHANNEL_ID,
+                    "媒体下载",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "显示正在进行的媒体下载"
+                }
+            )
+        }
+        val fileName = inputData.getString(KEY_FILE_NAME).orEmpty().ifBlank { "媒体文件" }
+        val notification = NotificationCompat.Builder(applicationContext, DOWNLOAD_CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle("正在下载媒体")
+            .setContentText(fileName)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setProgress(0, 0, true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+        return ForegroundInfo(DOWNLOAD_NOTIFICATION_ID, notification)
+    }
+
     override suspend fun doWork(): Result {
         val request = DownloadRequest(
             url = inputData.getString(KEY_URL).orEmpty(),
@@ -41,6 +72,8 @@ internal class DownloadWorker(
 
     companion object {
         const val TAG = "jiqu_download"
+        private const val DOWNLOAD_CHANNEL_ID = "download_progress"
+        private const val DOWNLOAD_NOTIFICATION_ID = 2001
         const val KEY_URL = "url"
         const val KEY_FILE_NAME = "file_name"
         const val KEY_EXTENSION = "extension"
