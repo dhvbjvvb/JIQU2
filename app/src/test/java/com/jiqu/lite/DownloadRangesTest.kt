@@ -26,8 +26,9 @@ class DownloadRangesTest {
     }
 
     @Test
-    fun requestedThreadCountIsCappedAtEight() {
-        assertEquals(8, calculateByteRanges(300L * 1024L * 1024L, requestedParts = 128).size)
+    fun requestedRangeCountUsesIndependentCap() {
+        assertEquals(128, calculateByteRanges(300L * 1024L * 1024L, requestedParts = 128).size)
+        assertEquals(256, calculateByteRanges(2L * 1024L * 1024L * 1024L, requestedParts = 512).size)
     }
 
     @Test
@@ -35,5 +36,45 @@ class DownloadRangesTest {
         assertEquals(1, recommendedDownloadThreads(19L * 1024L * 1024L))
         assertEquals(4, recommendedDownloadThreads(20L * 1024L * 1024L))
         assertEquals(8, recommendedDownloadThreads(200L * 1024L * 1024L))
+        assertEquals(12, recommendedDownloadThreads(512L * 1024L * 1024L))
+        assertEquals(16, recommendedDownloadThreads(2L * 1024L * 1024L * 1024L))
+    }
+
+    @Test
+    fun createsMoreRangesThanWorkersToReduceSlowTail() {
+        val totalBytes = 90L * 1024L * 1024L
+        val threadCount = recommendedDownloadThreads(totalBytes)
+        val rangeCount = recommendedDownloadRangeCount(totalBytes, threadCount)
+        val ranges = calculateByteRanges(totalBytes, rangeCount)
+
+        assertEquals(4, threadCount)
+        assertEquals(23, rangeCount)
+        assertEquals(rangeCount, ranges.size)
+        assertEquals(totalBytes, ranges.sumOf { it.last - it.first + 1 })
+    }
+
+    @Test
+    fun rangeCountStaysSingleForSingleThreadDownloads() {
+        assertEquals(1, recommendedDownloadRangeCount(10L * 1024L * 1024L, 1))
+    }
+
+    @Test
+    fun twoGigabyteDownloadUsesFineGrainedWorkQueue() {
+        val totalBytes = 2L * 1024L * 1024L * 1024L
+        val threadCount = recommendedDownloadThreads(totalBytes)
+        val rangeCount = recommendedDownloadRangeCount(totalBytes, threadCount)
+        val ranges = calculateByteRanges(totalBytes, rangeCount)
+
+        assertEquals(16, threadCount)
+        assertEquals(256, rangeCount)
+        assertEquals(rangeCount, ranges.size)
+        assertEquals(totalBytes, ranges.sumOf { it.last - it.first + 1 })
+    }
+
+    @Test
+    fun onlyLargeRangeDownloadsWriteDirectlyToMediaStore() {
+        assertEquals(false, shouldDownloadDirectlyToMediaStore(511L * 1024L * 1024L, true))
+        assertEquals(false, shouldDownloadDirectlyToMediaStore(2L * 1024L * 1024L * 1024L, false))
+        assertEquals(true, shouldDownloadDirectlyToMediaStore(2L * 1024L * 1024L * 1024L, true))
     }
 }

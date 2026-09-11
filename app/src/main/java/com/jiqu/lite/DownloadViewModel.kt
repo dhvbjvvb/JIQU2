@@ -39,12 +39,19 @@ import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
-private const val MAX_DOWNLOAD_THREADS = 8
+private const val MAX_DOWNLOAD_THREADS = 16
+private const val MAX_DOWNLOAD_RANGES = 256
 private const val SMALL_FILE_BYTES = 20L * 1024L * 1024L
-private const val LARGE_FILE_BYTES = 200L * 1024L * 1024L
+private const val MEDIUM_FILE_BYTES = 200L * 1024L * 1024L
+private const val LARGE_FILE_BYTES = 512L * 1024L * 1024L
+private const val HUGE_FILE_BYTES = 2L * 1024L * 1024L * 1024L
+private const val DIRECT_MEDIA_STORE_BYTES = 512L * 1024L * 1024L
+private const val TARGET_RANGE_BYTES = 4L * 1024L * 1024L
+private const val MAX_RANGES_PER_THREAD = 16
 sealed interface DownloadUiState {
     data object Idle : DownloadUiState
     data class Preparing(val fileName: String) : DownloadUiState
@@ -54,6 +61,7 @@ sealed interface DownloadUiState {
         val totalBytes: Long,
         val threadCount: Int
     ) : DownloadUiState
+    data class Saving(val fileName: String) : DownloadUiState
     data class Success(val fileName: String) : DownloadUiState
     data class Failure(val fileName: String, val message: String) : DownloadUiState
 }
@@ -82,7 +90,14 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
         uiState = DownloadUiState.Preparing(request.fileName)
         viewModelScope.launch {
             try {
-                MultipartDownloader(getApplication<Application>()).download(request) { downloaded, total, threads ->
+                MultipartDownloader(getApplication<Application>()).download(
+                    request = request,
+                    onSaving = {
+                        withContext(Dispatchers.Main.immediate) {
+                            uiState = DownloadUiState.Saving(request.fileName)
+                        }
+                    }
+                ) { downloaded, total, threads ->
                     withContext(Dispatchers.Main.immediate) {
                         uiState = DownloadUiState.Running(request.fileName, downloaded, total, threads)
                     }
@@ -141,7 +156,9 @@ private data class ByteRange(val start: Long, val endInclusive: Long)
 
 internal fun recommendedDownloadThreads(totalBytes: Long): Int = when {
     totalBytes < SMALL_FILE_BYTES -> 1
-    totalBytes < LARGE_FILE_BYTES -> 4
+    totalBytes < MEDIUM_FILE_BYTES -> 4
+    totalBytes < LARGE_FILE_BYTES -> 8
+    totalBytes < HUGE_FILE_BYTES -> 12
     else -> MAX_DOWNLOAD_THREADS
 }
 
@@ -150,7 +167,7 @@ internal fun calculateByteRanges(
     requestedParts: Int = recommendedDownloadThreads(totalBytes)
 ): List<LongRange> {
     require(totalBytes > 0)
-    val partCount = requestedParts.coerceIn(1, MAX_DOWNLOAD_THREADS).coerceAtMost(totalBytes.toIntSafe())
+    val partCount = requestedParts.coerceIn(1, MAX_DOWNLOAD_RANGES).coerceAtMost(totalBytes.toIntSafe())
     val baseSize = totalBytes / partCount
     val remainder = totalBytes % partCount
     var start = 0L
@@ -162,11 +179,33 @@ internal fun calculateByteRanges(
     }
 }
 
+internal fun recommendedDownloadRangeCount(totalBytes: Long, threadCount: Int): Int {
+    require(totalBytes > 0)
+    val normalizedThreads = threadCount.coerceIn(1, MAX_DOWNLOAD_THREADS)
+    if (normalizedThreads == 1) return 1
+    val sizeBasedCount = ((totalBytes + TARGET_RANGE_BYTES - 1) / TARGET_RANGE_BYTES).toIntSafe()
+    return sizeBasedCount
+        .coerceAtLeast(normalizedThreads)
+        .coerceAtMost(normalizedThreads * MAX_RANGES_PER_THREAD)
+}
+
+internal fun shouldDownloadDirectlyToMediaStore(
+    totalBytes: Long,
+    supportsRanges: Boolean,
+    thresholdBytes: Long = DIRECT_MEDIA_STORE_BYTES
+): Boolean = supportsRanges && totalBytes >= thresholdBytes
+
 private fun Long.toIntSafe(): Int = coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
-internal class MultipartDownloader(private val application: Context) {
+internal enum class DownloadStorageStrategy { STAGED, DIRECT_MEDIA_STORE }
+
+internal class MultipartDownloader(
+    private val application: Context,
+    private val directMediaStoreThresholdBytes: Long = DIRECT_MEDIA_STORE_BYTES
+) {
     suspend fun download(
         request: DownloadRequest,
+        onSaving: suspend () -> Unit = {},
         onProgress: suspend (downloaded: Long, total: Long, threads: Int) -> Unit
     ) = withContext(Dispatchers.IO) {
         val workDirectory = File(application.cacheDir, "downloads/${UUID.randomUUID()}")
@@ -177,12 +216,16 @@ internal class MultipartDownloader(private val application: Context) {
             // Some media CDNs advertise byte ranges but return 200 for a request
             // covering the complete file. Use the normal stream path for small
             // files so that this response is handled correctly.
-            val ranges = if (remoteInfo.supportsRanges && totalBytes > SMALL_FILE_BYTES) {
-                calculateByteRanges(totalBytes).map { ByteRange(it.first, it.last) }
+            val requestedThreads = recommendedDownloadThreads(totalBytes)
+            val ranges = if (remoteInfo.supportsRanges && requestedThreads > 1) {
+                calculateByteRanges(
+                    totalBytes = totalBytes,
+                    requestedParts = recommendedDownloadRangeCount(totalBytes, requestedThreads)
+                ).map { ByteRange(it.first, it.last) }
             } else {
                 emptyList()
             }
-            val threadCount = ranges.size.coerceAtLeast(1)
+            val threadCount = if (ranges.isEmpty()) 1 else requestedThreads.coerceAtMost(ranges.size)
             onProgress(0, totalBytes, threadCount)
             // Keep 100% reserved for the point after the MediaStore copy completes.
             val transferProgress: suspend (Long, Long, Int) -> Unit = { downloaded, reportedTotal, threads ->
@@ -194,25 +237,59 @@ internal class MultipartDownloader(private val application: Context) {
                 }
             }
 
+            var forceSingleStream = false
+            if (shouldDownloadDirectlyToMediaStore(
+                    totalBytes,
+                    remoteInfo.supportsRanges,
+                    directMediaStoreThresholdBytes
+                )
+            ) {
+                try {
+                    downloadPartsDirectlyToMediaStore(
+                        request = request,
+                        ranges = ranges,
+                        threadCount = threadCount,
+                        totalBytes = totalBytes,
+                        onProgress = transferProgress,
+                        onSaving = onSaving
+                    )
+                    val finalTotal = totalBytes.coerceAtLeast(1L)
+                    onProgress(finalTotal, finalTotal, threadCount)
+                    return@withContext DownloadStorageStrategy.DIRECT_MEDIA_STORE
+                } catch (error: Throwable) {
+                    if (!error.canFallbackToSingleStream()) throw error
+                    // Positional writes are not supported by every MediaStore
+                    // provider. Delete the pending item and retain the proven
+                    // cache + single-stream path as a compatibility fallback.
+                    forceSingleStream = true
+                    transferProgress(0L, totalBytes, 1)
+                }
+            }
+
             val stagingFile = File(workDirectory, "complete.download")
-            if (ranges.isEmpty()) {
+            var finalThreadCount = threadCount
+            if (ranges.isEmpty() || forceSingleStream) {
+                finalThreadCount = 1
                 downloadSingle(request.url, stagingFile, totalBytes, transferProgress)
             } else {
                 try {
-                    downloadParts(request.url, stagingFile, ranges, totalBytes, transferProgress)
+                    downloadParts(request.url, stagingFile, ranges, threadCount, totalBytes, transferProgress)
                 } catch (error: Throwable) {
                     if (!error.canFallbackToSingleStream()) throw error
                     // A CDN can advertise ranges during probing but return a full
                     // 200 response for actual slices. Restart as one stream.
                     stagingFile.delete()
+                    finalThreadCount = 1
                     transferProgress(0L, totalBytes, 1)
                     downloadSingle(request.url, stagingFile, totalBytes, transferProgress)
                 }
             }
 
+            onSaving()
             saveToDownloads(stagingFile, request)
             val finalTotal = totalBytes.coerceAtLeast(stagingFile.length()).coerceAtLeast(1L)
-            onProgress(finalTotal, finalTotal, threadCount)
+            onProgress(finalTotal, finalTotal, finalThreadCount)
+            DownloadStorageStrategy.STAGED
         } finally {
             workDirectory.deleteRecursively()
         }
@@ -225,7 +302,7 @@ internal class MultipartDownloader(private val application: Context) {
             val contentRange = connection.getHeaderField("Content-Range").orEmpty()
             val rangeTotal = contentRange.substringAfterLast('/', "").toLongOrNull()
             val contentLength = connection.getHeaderFieldLong("Content-Length", -1L)
-            connection.inputStream.use { stream ->
+            BufferedInputStream(connection.inputStream, NETWORK_BUFFER_SIZE).use { stream ->
                 val buffer = ByteArray(1)
                 stream.read(buffer)
             }
@@ -242,27 +319,44 @@ internal class MultipartDownloader(private val application: Context) {
         url: String,
         destination: File,
         ranges: List<ByteRange>,
+        threadCount: Int,
+        totalBytes: Long,
+        onProgress: suspend (Long, Long, Int) -> Unit
+    ) {
+        RandomAccessFile(destination, "rw").use { file ->
+            file.setLength(totalBytes)
+            downloadParts(url, file.channel, ranges, threadCount, totalBytes, onProgress)
+        }
+    }
+
+    private suspend fun downloadParts(
+        url: String,
+        output: FileChannel,
+        ranges: List<ByteRange>,
+        threadCount: Int,
         totalBytes: Long,
         onProgress: suspend (Long, Long, Int) -> Unit
     ) = coroutineScope {
-        // Each range writes directly to its final offset in the staging file.
-        RandomAccessFile(destination, "rw").use { it.setLength(totalBytes) }
         val downloaded = AtomicLong(0)
         val lastUpdate = AtomicLong(0)
-        ranges.map { range ->
+        val nextRangeIndex = AtomicInteger(0)
+        List(threadCount) {
             async(Dispatchers.IO) {
-                downloadPartWithRetry(url, destination, range) { byteCount ->
-                    val current = downloaded.addAndGet(byteCount)
-                    emitProgress(current, totalBytes, ranges.size, lastUpdate, onProgress)
+                while (true) {
+                    val range = ranges.getOrNull(nextRangeIndex.getAndIncrement()) ?: break
+                    downloadPartWithRetry(url, output, range) { byteCount ->
+                        val current = downloaded.addAndGet(byteCount)
+                        emitProgress(current, totalBytes, threadCount, lastUpdate, onProgress)
+                    }
                 }
             }
         }.awaitAll()
-        onProgress(totalBytes, totalBytes, ranges.size)
+        onProgress(totalBytes, totalBytes, threadCount)
     }
 
     private suspend fun downloadPartWithRetry(
         url: String,
-        destination: File,
+        output: FileChannel,
         range: ByteRange,
         onBytesCopied: suspend (Long) -> Unit
     ) {
@@ -282,19 +376,17 @@ internal class MultipartDownloader(private val application: Context) {
                 check(connection.responseCode == HttpURLConnection.HTTP_PARTIAL) {
                     "服务器未返回分片数据"
                 }
-                BufferedInputStream(connection.inputStream).use { input ->
-                    RandomAccessFile(destination, "rw").use { file ->
-                        copyWithProgress(
-                            input = input,
-                            output = file.channel,
-                            startOffset = requestStart,
-                            maxBytes = expectedSize - downloadedForPart,
-                            onBytesCopied = { byteCount ->
-                                downloadedForPart += byteCount
-                                onBytesCopied(byteCount)
-                            }
-                        )
-                    }
+                BufferedInputStream(connection.inputStream, NETWORK_BUFFER_SIZE).use { input ->
+                    copyWithProgress(
+                        input = input,
+                        output = output,
+                        startOffset = requestStart,
+                        maxBytes = expectedSize - downloadedForPart,
+                        onBytesCopied = { byteCount ->
+                            downloadedForPart += byteCount
+                            onBytesCopied(byteCount)
+                        }
+                    )
                 }
                 if (downloadedForPart == expectedSize) return
                 lastError = IOException("下载分片不完整")
@@ -307,6 +399,45 @@ internal class MultipartDownloader(private val application: Context) {
             if (attempt < 2) delay(500L * (attempt + 1))
         }
         throw IOException("分片下载重试后仍然失败", lastError)
+    }
+
+    private suspend fun downloadPartsDirectlyToMediaStore(
+        request: DownloadRequest,
+        ranges: List<ByteRange>,
+        threadCount: Int,
+        totalBytes: Long,
+        onProgress: suspend (Long, Long, Int) -> Unit,
+        onSaving: suspend () -> Unit
+    ) {
+        check(ranges.isNotEmpty()) { "远程文件不支持分片直写" }
+        val resolver = application.contentResolver
+        val uri = createPendingDownload(request)
+        try {
+            val descriptor = checkNotNull(resolver.openFileDescriptor(uri, "rw")) {
+                "无法打开下载文件"
+            }
+            descriptor.use { pfd ->
+                FileOutputStream(pfd.fileDescriptor).channel.use { output ->
+                    prepareOutputChannel(output, totalBytes)
+                    downloadParts(request.url, output, ranges, threadCount, totalBytes, onProgress)
+                    output.force(true)
+                }
+            }
+            onSaving()
+            publishPendingDownload(uri)
+        } catch (error: Throwable) {
+            resolver.delete(uri, null, null)
+            throw error
+        }
+    }
+
+    private fun prepareOutputChannel(output: FileChannel, totalBytes: Long) {
+        output.truncate(0L)
+        if (totalBytes <= 0L) return
+        val marker = ByteBuffer.allocate(1)
+        while (marker.hasRemaining()) {
+            check(output.write(marker, totalBytes - 1) > 0) { "无法预分配下载文件" }
+        }
     }
 
     private fun Throwable.canFallbackToSingleStream(): Boolean =
@@ -326,8 +457,8 @@ internal class MultipartDownloader(private val application: Context) {
             check(connection.responseCode in 200..299) { "服务器返回 ${connection.responseCode}" }
             val responseLength = connection.getHeaderFieldLong("Content-Length", -1L)
             val total = responseLength.coerceAtLeast(knownTotal)
-            BufferedInputStream(connection.inputStream).use { input ->
-                BufferedOutputStream(FileOutputStream(destination)).use { output ->
+            BufferedInputStream(connection.inputStream, NETWORK_BUFFER_SIZE).use { input ->
+                BufferedOutputStream(FileOutputStream(destination), NETWORK_BUFFER_SIZE).use { output ->
                     copyWithProgress(
                         input = input,
                         output = output,
@@ -365,7 +496,7 @@ internal class MultipartDownloader(private val application: Context) {
         maxBytes: Long? = null,
         onBytesCopied: suspend (Long) -> Unit
     ) {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 4)
+        val buffer = ByteArray(NETWORK_BUFFER_SIZE)
         var remaining = maxBytes
         while (true) {
             coroutineContext.ensureActive()
@@ -389,7 +520,7 @@ internal class MultipartDownloader(private val application: Context) {
         maxBytes: Long,
         onBytesCopied: suspend (Long) -> Unit
     ) {
-        val buffer = ByteArray(DEFAULT_BUFFER_SIZE * 4)
+        val buffer = ByteArray(NETWORK_BUFFER_SIZE)
         var remaining = maxBytes
         var position = startOffset
         while (remaining > 0L) {
@@ -408,6 +539,19 @@ internal class MultipartDownloader(private val application: Context) {
     }
 
     private fun saveToDownloads(source: File, request: DownloadRequest): android.net.Uri {
+        val resolver = application.contentResolver
+        val uri = createPendingDownload(request)
+        try {
+            copyToMediaStore(resolver, uri, source)
+            publishPendingDownload(uri)
+            return uri
+        } catch (error: Throwable) {
+            resolver.delete(uri, null, null)
+            throw error
+        }
+    }
+
+    private fun createPendingDownload(request: DownloadRequest): android.net.Uri {
         val extension = request.extension.trim('.').ifBlank { "mp4" }
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "${request.fileName}.$extension")
@@ -423,19 +567,15 @@ internal class MultipartDownloader(private val application: Context) {
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val resolver = application.contentResolver
-        val uri = checkNotNull(resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)) {
+        return checkNotNull(resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)) {
             "无法创建下载文件"
         }
-        try {
-            copyToMediaStore(resolver, uri, source)
-            resolver.update(uri, ContentValues().apply {
-                put(MediaStore.MediaColumns.IS_PENDING, 0)
-            }, null, null)
-            return uri
-        } catch (error: Throwable) {
-            resolver.delete(uri, null, null)
-            throw error
-        }
+    }
+
+    private fun publishPendingDownload(uri: android.net.Uri) {
+        application.contentResolver.update(uri, ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_PENDING, 0)
+        }, null, null)
     }
 
     /** Uses a kernel-level channel transfer when available, with a buffered fallback. */
@@ -480,14 +620,21 @@ internal class MultipartDownloader(private val application: Context) {
         }
     }
 
-    private fun openConnection(url: String): HttpURLConnection =
-        (URL(url).openConnection() as HttpURLConnection).apply {
+    private fun openConnection(url: String): HttpURLConnection {
+        val remoteUrl = URL(url)
+        return (remoteUrl.openConnection() as HttpURLConnection).apply {
             connectTimeout = 15_000
             readTimeout = 90_000
             instanceFollowRedirects = true
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("User-Agent", "Mozilla/5.0 (Android) Jiqu/1.0")
+            if (remoteUrl.host.equals("bilivideo.com", ignoreCase = true) ||
+                remoteUrl.host.endsWith(".bilivideo.com", ignoreCase = true)
+            ) {
+                setRequestProperty("Referer", "https://www.bilibili.com/")
+            }
         }
+    }
 
     private fun mimeType(extension: String): String = when (extension.lowercase()) {
         "mp3" -> "audio/mpeg"
@@ -503,6 +650,7 @@ internal class MultipartDownloader(private val application: Context) {
     }
 
     private companion object {
+        const val NETWORK_BUFFER_SIZE = 256 * 1024
         const val COPY_BUFFER_SIZE = 1024 * 1024
     }
 }

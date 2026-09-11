@@ -71,6 +71,7 @@ private const val BUGPK_API_BASE = "https://api.bugpk.com/api/"
 private const val DOUYIN_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/dyjx"
 private const val WECHAT_CHANNELS_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/wxsph"
 private const val KUAISHOU_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/ksjx"
+private const val BILIBILI_MEDIA_ENDPOINT = "https://api-new.ifphp.com/api/bilibili"
 private const val PARSE_CACHE_DURATION_MS = 5 * 60 * 1_000L
 private const val DOUYIN_HIGH_QUALITY_PLAY_ENDPOINT = "https://www.douyin.com/aweme/v1/play/"
 private val parseCache = mutableMapOf<String, CachedParse>()
@@ -108,6 +109,9 @@ internal fun isKuaishouUrl(sourceUrl: String): Boolean {
     return host == "kuaishou.com" || host.endsWith(".kuaishou.com") ||
         host == "kwai.com" || host.endsWith(".kwai.com")
 }
+internal fun isBilibiliUrl(sourceUrl: String): Boolean =
+    hasHost(sourceUrl, "bilibili.com", "b23.tv")
+
 private fun hasHost(sourceUrl: String, vararg hosts: String): Boolean {
     val host = runCatching { URL(sourceUrl).host.lowercase() }.getOrDefault("")
     return hosts.any { host == it || host.endsWith(".$it") }
@@ -123,6 +127,7 @@ internal fun isZuiyouUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "izuiy
 internal fun isToutiaoUrl(sourceUrl: String): Boolean = hasHost(sourceUrl, "toutiao.com", "toutiaovod.com")
 private enum class MediaPlatform(val displayName: String, val requiresApiKey: Boolean = false) {
     DOUYIN("douyin", true),
+    BILIBILI("哔哩哔哩", true),
     WECHAT_CHANNELS("微信视频号", true),
     KUAISHOU("快手", true),
     DOUBAO("豆包", true),
@@ -136,6 +141,7 @@ private enum class MediaPlatform(val displayName: String, val requiresApiKey: Bo
 
 private fun mediaPlatformForUrl(sourceUrl: String): MediaPlatform? = when {
     isDouyinUrl(sourceUrl) -> MediaPlatform.DOUYIN
+    isBilibiliUrl(sourceUrl) -> MediaPlatform.BILIBILI
     isWechatChannelsUrl(sourceUrl) -> MediaPlatform.WECHAT_CHANNELS
     isKuaishouUrl(sourceUrl) -> MediaPlatform.KUAISHOU
     isDoubaoUrl(sourceUrl) -> MediaPlatform.DOUBAO
@@ -216,10 +222,13 @@ private suspend fun parseMediaUrlInternal(
             throw candidateResults.mapNotNull { it.exceptionOrNull() }.lastOrNull()
                 ?: IllegalStateException("解析服务暂时不可用")
         }
-        // The resolver already provides the media metadata. Avoid probing every
-        // signed CDN URL before showing the result; that turns a fast API call
-        // into several extra network round trips.
-        val sizedCandidates = candidates
+        // Resolver responses vary by platform. Preserve every supplied or
+        // bitrate-estimated size, and only probe URLs whose size is still unknown.
+        // The one-byte range request is shared by all platforms and fails open,
+        // so an incompatible CDN cannot prevent the parse result from appearing.
+        val sizedCandidates = candidates.map { candidate ->
+            candidate.copy(options = enrichDownloadOptionSizes(candidate.options))
+        }
         val bestCandidate = sizedCandidates.maxByOrNull { candidateQuality(it.options) }!!
         val root = bestCandidate.root
         val data = bestCandidate.data
@@ -399,20 +408,30 @@ private suspend fun enrichDownloadOptionSizes(
 ): List<MediaDownloadOption> = coroutineScope {
     options.map { option ->
         async(Dispatchers.IO) {
-            option.copy(sizeBytes = fetchRemoteFileSize(option.downloadUrl) ?: option.sizeBytes)
+            if (option.sizeBytes != null) {
+                option
+            } else {
+                option.copy(sizeBytes = fetchRemoteFileSize(option.downloadUrl))
+            }
         }
     }.awaitAll()
 }
 
 private fun fetchRemoteFileSize(url: String): Long? {
     fun request(method: String, range: String? = null): Long? {
-        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        val remoteUrl = URL(url)
+        val connection = (remoteUrl.openConnection() as HttpURLConnection).apply {
             requestMethod = method
             connectTimeout = 5_000
             readTimeout = 8_000
             instanceFollowRedirects = true
             setRequestProperty("Accept-Encoding", "identity")
             setRequestProperty("User-Agent", "Mozilla/5.0 (Android) Jiqu/1.0")
+            if (remoteUrl.host.equals("bilivideo.com", ignoreCase = true) ||
+                remoteUrl.host.endsWith(".bilivideo.com", ignoreCase = true)
+            ) {
+                setRequestProperty("Referer", "https://www.bilibili.com/")
+            }
             range?.let { setRequestProperty("Range", it) }
         }
         return try {
@@ -725,6 +744,7 @@ private suspend fun requestParseResultWithRetry(
 private fun requestParseResult(sourceUrl: String, platform: MediaPlatform): JSONObject {
     val endpoint = when (platform) {
         MediaPlatform.DOUYIN -> DOUYIN_MEDIA_ENDPOINT
+        MediaPlatform.BILIBILI -> BILIBILI_MEDIA_ENDPOINT
         MediaPlatform.WECHAT_CHANNELS -> WECHAT_CHANNELS_MEDIA_ENDPOINT
         MediaPlatform.KUAISHOU -> KUAISHOU_MEDIA_ENDPOINT
         MediaPlatform.DOUBAO -> "https://api-new.ifphp.com/api/doubao"

@@ -9,6 +9,8 @@ class MediaQualityTest {
     @Test
     fun supportedPlatformHostsAreRecognizedForAutoParse() {
         assertTrue(isSupportedMediaUrl("https://v.douyin.com/example/"))
+        assertTrue(isSupportedMediaUrl("https://b23.tv/example"))
+        assertTrue(isSupportedMediaUrl("https://www.bilibili.com/video/BV1xx411c7mD"))
         assertTrue(isSupportedMediaUrl("https://v.kuaishou.com/example"))
         assertTrue(isSupportedMediaUrl("https://v.weixin.qq.com/share/video/1"))
         assertTrue(isSupportedMediaUrl("https://h5.pipix.com/s/example/"))

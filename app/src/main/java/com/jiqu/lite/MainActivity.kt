@@ -3,10 +3,12 @@ package com.jiqu.lite
 import android.Manifest
 import android.app.NotificationManager
 import android.content.ClipboardManager
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -35,6 +37,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -69,6 +72,7 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
@@ -101,6 +105,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -125,13 +130,18 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
@@ -145,8 +155,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
@@ -160,9 +168,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideInHorizontally
-import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.animation.togetherWith
 import com.jiqu.lite.ui.theme.JiquTheme
 import com.jiqu.lite.data.ParsedMedia
 import com.jiqu.lite.data.MediaDownloadOption
@@ -186,7 +191,9 @@ import java.util.concurrent.Semaphore
 import kotlin.math.roundToInt
 
 private enum class AppDestination(val label: String) { Parse("解析"), History("历史"), Settings("设置") }
-private enum class SettingsPage { Main, Theme, Downloads, Automation, Tutorials, About }
+private enum class SettingsPage { Main, Theme, Downloads, Automation, Tutorials, Feedback, About }
+
+private const val QQ_GROUP_NUMBER = "1124541108"
 
 internal fun destinationIndexForPosition(positionX: Float, width: Float, itemCount: Int): Int {
     if (itemCount <= 1 || width <= 0f) return 0
@@ -484,6 +491,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        window.navigationBarColor = android.graphics.Color.TRANSPARENT
         setContent {
             val preferences = remember {
                 getSharedPreferences(AppPreferences.FILE, Context.MODE_PRIVATE)
@@ -493,6 +504,9 @@ class MainActivity : ComponentActivity() {
             }
             var accentHue by remember {
                 mutableFloatStateOf(preferences.getFloat(AppPreferences.ACCENT_HUE, 196f))
+            }
+            var uiScale by remember {
+                mutableFloatStateOf(preferences.getFloat(AppPreferences.UI_SCALE, 1f))
             }
             var appleFloatingNav by remember {
                 mutableStateOf(preferences.getBoolean(AppPreferences.APPLE_FLOATING_NAV, true))
@@ -513,7 +527,14 @@ class MainActivity : ComponentActivity() {
                 mutableStateOf(preferences.getBoolean(AppPreferences.AUTO_PASTE_PARSE, true))
             }
             JiquTheme(darkTheme = darkTheme, accentHue = accentHue) {
-                JiquApp(
+                val baseDensity = LocalDensity.current
+                CompositionLocalProvider(
+                    LocalDensity provides Density(
+                        density = baseDensity.density * uiScale,
+                        fontScale = baseDensity.fontScale * uiScale
+                    )
+                ) {
+                    JiquApp(
                     darkTheme = darkTheme,
                     accentHue = accentHue,
                     appleFloatingNav = appleFloatingNav,
@@ -530,6 +551,11 @@ class MainActivity : ComponentActivity() {
                     onAccentHueChange = {
                         accentHue = it
                         preferences.edit().putFloat(AppPreferences.ACCENT_HUE, it).apply()
+                    },
+                    uiScale = uiScale,
+                    onUiScaleChange = {
+                        uiScale = it
+                        preferences.edit().putFloat(AppPreferences.UI_SCALE, it).apply()
                     },
                     onAppleFloatingNavChange = {
                         appleFloatingNav = it
@@ -558,7 +584,8 @@ class MainActivity : ComponentActivity() {
                         updateViewModel.selectUpdateChannel(this@MainActivity, update, useGitHub)
                     },
                     onContinueUpdateInstall = { updateViewModel.continuePendingInstall(this@MainActivity) }
-                )
+                    )
+                }
             }
         }
     }
@@ -710,6 +737,7 @@ class MainActivity : ComponentActivity() {
 private fun JiquApp(
     darkTheme: Boolean,
     accentHue: Float,
+    uiScale: Float,
     appleFloatingNav: Boolean,
     notificationsEnabled: Boolean,
     autoPasteParseEnabled: Boolean,
@@ -719,6 +747,7 @@ private fun JiquApp(
     onHistoryRecorded: (Long) -> Unit,
     onThemeChange: (Boolean) -> Unit,
     onAccentHueChange: (Float) -> Unit,
+    onUiScaleChange: (Float) -> Unit,
     onAppleFloatingNavChange: (Boolean) -> Unit,
     onNotificationsChange: (Boolean) -> Unit,
     onAutoPasteParseChange: (Boolean) -> Unit,
@@ -739,6 +768,14 @@ private fun JiquApp(
     var destinationName by rememberSaveable { mutableStateOf(AppDestination.Parse.name) }
     val destination = AppDestination.valueOf(destinationName)
     val context = LocalContext.current
+    val preferences = remember(context.applicationContext) {
+        context.applicationContext.getSharedPreferences(AppPreferences.FILE, Context.MODE_PRIVATE)
+    }
+    var feedbackIntroStage by rememberSaveable {
+        mutableIntStateOf(
+            if (preferences.getBoolean(AppPreferences.FEEDBACK_INTRO_CONFIRMED, false)) 0 else 1
+        )
+    }
     val lifecycle = (context as? ComponentActivity)?.lifecycle
     val clipboardManager = context.getSystemService(ClipboardManager::class.java)
     val latestParsing by rememberUpdatedState(parseUiState.parsing)
@@ -844,17 +881,8 @@ private fun JiquApp(
         }
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().background(animatedBackground)) {
-            AnimatedContent(
-                targetState = destination,
-                modifier = Modifier.fillMaxSize().padding(innerPadding),
-                transitionSpec = {
-                    val direction = if (targetState.ordinal >= initialState.ordinal) 1 else -1
-                    (slideInHorizontally(initialOffsetX = { it * direction }) + fadeIn()) togetherWith
-                        (slideOutHorizontally(targetOffsetX = { -it * direction }) + fadeOut())
-                },
-                label = "destination-transition"
-            ) { page ->
-                when (page) {
+            Box(Modifier.fillMaxSize().padding(innerPadding)) {
+                when (destination) {
                     AppDestination.Parse -> ParseScreen(
                         modifier = Modifier.fillMaxSize(),
                         isActive = true,
@@ -880,11 +908,13 @@ private fun JiquApp(
                         isActive = true,
                         darkTheme = darkTheme,
                         accentHue = accentHue,
+                        uiScale = uiScale,
                         appleFloatingNav = appleFloatingNav,
                         notificationsEnabled = notificationsEnabled,
                         autoPasteParseEnabled = autoPasteParseEnabled,
                         onThemeChange = onThemeChange,
                         onAccentHueChange = onAccentHueChange,
+                        onUiScaleChange = onUiScaleChange,
                         onAppleFloatingNavChange = onAppleFloatingNavChange,
                         onNotificationsChange = onNotificationsChange,
                         onAutoPasteParseChange = onAutoPasteParseChange,
@@ -908,17 +938,89 @@ private fun JiquApp(
     if (downloadUiState !is DownloadUiState.Idle) {
         DownloadProgressDialog(downloadUiState, onDismissDownload)
     }
-    UpdateStatusDialog(
-        state = updateUiState,
-        onDismiss = onDismissUpdate,
-        onRetryCheck = onCheckForUpdate,
-        onIgnore = onIgnoreAutomaticUpdates,
-        onDownload = onDownloadUpdate,
-        onSelectChannel = { update, useGitHub ->
-            onSelectUpdateChannel(update, useGitHub)
+    if (feedbackIntroStage == 0) {
+        UpdateStatusDialog(
+            state = updateUiState,
+            onDismiss = onDismissUpdate,
+            onRetryCheck = onCheckForUpdate,
+            onIgnore = onIgnoreAutomaticUpdates,
+            onDownload = onDownloadUpdate,
+            onSelectChannel = { update, useGitHub ->
+                onSelectUpdateChannel(update, useGitHub)
+            },
+            onContinueInstall = onContinueUpdateInstall
+        )
+    } else {
+        FirstLaunchFeedbackDialog(
+            stage = feedbackIntroStage,
+            onIgnore = { feedbackIntroStage = 2 },
+            onConfirm = {
+                preferences.edit().putBoolean(AppPreferences.FEEDBACK_INTRO_CONFIRMED, true).apply()
+                feedbackIntroStage = 0
+            }
+        )
+    }
+}
+
+private fun loadVideoFirstFrame(url: String?): Bitmap? {
+    if (url.isNullOrBlank() || !url.isUsableMediaUrl()) return null
+    return runCatching {
+        val retriever = MediaMetadataRetriever()
+        try {
+            retriever.setDataSource(url, emptyMap())
+            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+        } finally {
+            retriever.release()
+        }
+    }.getOrNull()
+}
+
+@Composable
+private fun FirstLaunchFeedbackDialog(
+    stage: Int,
+    onIgnore: () -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = {},
+        shape = RoundedCornerShape(24.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        title = { Text(if (stage == 1) "交流反馈" else "提示") },
+        text = {
+            if (stage == 1) {
+                FeedbackGroupImage(constrainForDialog = true)
+            } else {
+                Text("可在设置中点击“交流反馈”加Q群进行问题反馈")
+            }
         },
-        onContinueInstall = onContinueUpdateInstall
+        confirmButton = {
+            TextButton(onClick = if (stage == 1) onIgnore else onConfirm) {
+                Text(if (stage == 1) "忽略" else "确定")
+            }
+        }
     )
+}
+
+@Composable
+private fun FeedbackGroupImage(constrainForDialog: Boolean = false) {
+    val configuration = LocalConfiguration.current
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val naturalHeight = maxWidth * (1657f / 1348f)
+        val imageHeight = if (constrainForDialog) {
+            minOf(naturalHeight, configuration.screenHeightDp.dp * 0.52f)
+        } else {
+            naturalHeight
+        }
+        Image(
+            painter = painterResource(R.drawable.feedback_qq_group),
+            contentDescription = "QQ 交流群图片",
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(imageHeight)
+                .clip(RoundedCornerShape(16.dp)),
+            contentScale = ContentScale.Fit
+        )
+    }
 }
 
 @Composable
@@ -933,7 +1035,15 @@ private fun ParseScreen(
     onDownloadAudio: (ParsedMedia) -> Unit,
 ) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
     val clipboardManager = context.getSystemService(ClipboardManager::class.java)
+    LaunchedEffect(state.parsedMedia) {
+        if (state.parsedMedia != null) {
+            focusManager.clearFocus(force = true)
+            keyboardController?.hide()
+        }
+    }
     Column(
         modifier = modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 0.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -954,6 +1064,7 @@ private fun ParseScreen(
                             .orEmpty()
                         extractHttpUrl(clipboardText)?.let { url ->
                             onSourceUrlChange(url)
+                            keyboardController?.show()
                             if (isSupportedMediaUrl(url)) onParse(url)
                         }
                     },
@@ -966,6 +1077,7 @@ private fun ParseScreen(
                 value = state.sourceUrl,
                 onValueChange = { input ->
                     onSourceUrlChange(extractHttpUrl(input) ?: input)
+                    keyboardController?.show()
                 },
                 modifier = Modifier.fillMaxWidth(),
                 placeholder = { Text("粘贴平台分享链接", color = MaterialTheme.colorScheme.onSurfaceVariant) },
@@ -990,24 +1102,76 @@ private fun ParseScreen(
                 )
             )
             Spacer(Modifier.height(14.dp))
-            Button(
-                onClick = {
-                    extractHttpUrl(state.sourceUrl)?.let(onParse)
-                },
-                enabled = !state.parsing && extractHttpUrl(state.sourceUrl) != null,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp).pressScaleOnPointer(),
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                elevation = ButtonDefaults.buttonElevation(defaultElevation = 5.dp)
+            val parseUrl = extractHttpUrl(state.sourceUrl)
+            val parseButtonEnabled = !state.parsing && parseUrl != null
+            val parseButtonHasValidUrl = parseUrl != null
+            val parseButtonInteractionSource = remember { MutableInteractionSource() }
+            val parseButtonShape = RoundedCornerShape(16.dp)
+            val parseButtonContainerColor = if (parseButtonHasValidUrl) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+            }
+            val parseButtonContentColor = if (parseButtonHasValidUrl) {
+                MaterialTheme.colorScheme.onPrimary
+            } else {
+                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+            }
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 52.dp)
+                    .pressScale(parseButtonInteractionSource),
+                shape = parseButtonShape,
+                color = parseButtonContainerColor,
+                contentColor = parseButtonContentColor,
+                shadowElevation = if (parseButtonHasValidUrl) 5.dp else 0.dp
             ) {
-                if (state.parsing) {
-                    CircularProgressIndicator(modifier = Modifier.size(19.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-                    Spacer(Modifier.width(9.dp))
-                    Text("正在解析", fontWeight = FontWeight.SemiBold)
-                } else {
-                    Icon(Icons.Outlined.PlayArrow, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("开始解析", fontWeight = FontWeight.SemiBold)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 52.dp)
+                        .clickable(
+                            interactionSource = parseButtonInteractionSource,
+                            indication = null,
+                            enabled = parseButtonEnabled,
+                            role = Role.Button,
+                            onClick = {
+                                focusManager.clearFocus(force = true)
+                                keyboardController?.hide()
+                                parseUrl?.let(onParse)
+                            }
+                        )
+                        .padding(horizontal = 24.dp, vertical = 14.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (state.parsing) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(19.dp),
+                                strokeWidth = 2.dp,
+                                color = parseButtonContentColor
+                            )
+                            Spacer(Modifier.width(9.dp))
+                            Text(
+                                "正在解析",
+                                color = parseButtonContentColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        } else {
+                            Icon(
+                                Icons.Outlined.PlayArrow,
+                                contentDescription = null,
+                                tint = parseButtonContentColor
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "开始解析",
+                                color = parseButtonContentColor,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1100,6 +1264,7 @@ private fun FloatingNavigationBar(
     var barWidthPx by remember { mutableFloatStateOf(0f) }
     var dragPositionX by remember { mutableFloatStateOf(0f) }
     var isDragging by remember { mutableStateOf(false) }
+    var dragDestinationIndex by remember { mutableIntStateOf(destination.ordinal) }
     val slotWidthPx = if (barWidthPx > 0f) barWidthPx / destinations.size else 0f
     val restingPosition = destination.ordinal * slotWidthPx
     val indicatorTarget = if (isDragging) {
@@ -1107,19 +1272,20 @@ private fun FloatingNavigationBar(
     } else {
         restingPosition
     }
-    val indicatorPosition by animateFloatAsState(
-        targetValue = indicatorTarget,
-        animationSpec = if (isDragging) tween(45) else spring(
+    val restingIndicatorPosition by animateFloatAsState(
+        targetValue = restingPosition,
+        animationSpec = spring(
             dampingRatio = Spring.DampingRatioMediumBouncy,
             stiffness = Spring.StiffnessMediumLow
         ),
         label = "floating-navigation-indicator"
     )
+    val indicatorPosition = if (isDragging) indicatorTarget else restingIndicatorPosition
+    val feedbackDestinationIndex = if (isDragging) dragDestinationIndex else destination.ordinal
 
-    fun selectAt(positionX: Float) {
+    fun updateDragPosition(positionX: Float) {
         dragPositionX = positionX.coerceIn(0f, barWidthPx)
-        val target = destinations[destinationIndexForPosition(positionX, barWidthPx, destinations.size)]
-        onDestinationChange(target)
+        dragDestinationIndex = destinationIndexForPosition(positionX, barWidthPx, destinations.size)
     }
 
     Box(
@@ -1128,13 +1294,14 @@ private fun FloatingNavigationBar(
             .windowInsetsPadding(WindowInsets.navigationBars)
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
-        Surface(
+        val barShape = RoundedCornerShape(32.dp)
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .align(Alignment.Center),
-            shape = RoundedCornerShape(32.dp),
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.97f),
-            shadowElevation = 14.dp
+                .align(Alignment.Center)
+                .shadow(14.dp, barShape)
+                .clip(barShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
         ) {
             Box(
                 modifier = Modifier
@@ -1142,16 +1309,19 @@ private fun FloatingNavigationBar(
                     .height(68.dp)
                     .onSizeChanged { barWidthPx = it.width.toFloat() }
                     .pointerInput(barWidthPx) {
-                        detectDragGesturesAfterLongPress(
+                        detectDragGestures(
                             onDragStart = { position ->
                                 isDragging = true
                                 hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                                selectAt(position.x)
+                                updateDragPosition(position.x)
                             },
                             onDragCancel = { isDragging = false },
-                            onDragEnd = { isDragging = false },
+                            onDragEnd = {
+                                onDestinationChange(destinations[dragDestinationIndex])
+                                isDragging = false
+                            },
                             onDrag = { change, _ ->
-                                selectAt(change.position.x)
+                                updateDragPosition(change.position.x)
                                 change.consume()
                             }
                         )
@@ -1163,14 +1333,22 @@ private fun FloatingNavigationBar(
                             .offset { IntOffset(indicatorPosition.roundToInt(), 0) }
                             .width(with(density) { slotWidthPx.toDp() })
                             .fillMaxHeight()
-                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                            .padding(
+                                horizontal = if (isDragging) 4.dp else 10.dp,
+                                vertical = if (isDragging) 4.dp else 8.dp
+                            )
+                            .graphicsLayer {
+                                scaleX = if (isDragging) 1.04f else 1f
+                                scaleY = if (isDragging) 1.08f else 1f
+                                translationY = if (isDragging) -3.dp.toPx() else 0f
+                            }
                     ) {
-                        Surface(
-                            modifier = Modifier.fillMaxSize(),
-                            shape = RoundedCornerShape(24.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            shadowElevation = 0.dp
-                        ) {}
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(MaterialTheme.colorScheme.primaryContainer)
+                        )
                     }
                 }
                 Row(
@@ -1179,7 +1357,12 @@ private fun FloatingNavigationBar(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     destinations.forEach { item ->
-                        val selected = destination == item
+                        val selected = feedbackDestinationIndex == item.ordinal
+                        val itemScale by animateFloatAsState(
+                            targetValue = if (selected && isDragging) 1.12f else 1f,
+                            animationSpec = tween(80),
+                            label = "navigation-item-feedback"
+                        )
                         val contentColor = if (selected) {
                             MaterialTheme.colorScheme.primary
                         } else {
@@ -1190,6 +1373,11 @@ private fun FloatingNavigationBar(
                             modifier = Modifier
                                 .weight(1f)
                                 .fillMaxHeight()
+                                .graphicsLayer {
+                                    scaleX = itemScale
+                                    scaleY = itemScale
+                                    translationY = if (selected && isDragging) -2.dp.toPx() else 0f
+                                }
                                 .clickable(
                                     interactionSource = interactionSource,
                                     indication = null,
@@ -1498,7 +1686,7 @@ private fun MediaPreviewWindow(
                                 contentScale = androidx.compose.ui.layout.ContentScale.Crop
                             )
                         }
-                        if (!hasPreviewFrame) {
+                        if (!hasPreviewFrame && coverBitmap == null) {
                             Box(
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -1973,7 +2161,8 @@ private fun DownloadProgressDialog(
     onDismiss: () -> Unit
 ) {
     val canDismiss = state is DownloadUiState.Success || state is DownloadUiState.Failure
-    val isProcessing = state is DownloadUiState.Preparing || state is DownloadUiState.Running
+    val isProcessing = state is DownloadUiState.Preparing ||
+        state is DownloadUiState.Running || state is DownloadUiState.Saving
     val pulseTransition = rememberInfiniteTransition(label = "download-status-pulse")
     val statusAlpha by pulseTransition.animateFloat(
         initialValue = 0.72f,
@@ -1990,6 +2179,7 @@ private fun DownloadProgressDialog(
                 when (state) {
                     is DownloadUiState.Success -> "下载完成"
                     is DownloadUiState.Failure -> "下载失败"
+                    is DownloadUiState.Saving -> "正在保存"
                     else -> "正在下载"
                 },
                 modifier = Modifier.alpha(if (isProcessing) statusAlpha else 1f)
@@ -2000,6 +2190,7 @@ private fun DownloadProgressDialog(
                 val fileName = when (state) {
                     is DownloadUiState.Preparing -> state.fileName
                     is DownloadUiState.Running -> state.fileName
+                    is DownloadUiState.Saving -> state.fileName
                     is DownloadUiState.Success -> state.fileName
                     is DownloadUiState.Failure -> state.fileName
                     DownloadUiState.Idle -> ""
@@ -2051,6 +2242,13 @@ private fun DownloadProgressDialog(
                         Text(
                             "${state.threadCount} 个下载线程",
                             style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    is DownloadUiState.Saving -> {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                        Text(
+                            "网络下载已完成，正在保存到 Download/JIQU…",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
@@ -2471,66 +2669,75 @@ private fun HistoryScreen(
             }
         } else {
             entries.forEach { entry ->
-                val selected = entry.sourceUrl in selectedSourceUrls
-                val cardShape = RoundedCornerShape(24.dp)
-                val interactionSource = remember(entry.sourceUrl) { MutableInteractionSource() }
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .pressScale(interactionSource, pressedScale = 0.98f)
-                        .shadow(
-                            elevation = if (selected) 10.dp else 16.dp,
-                            shape = cardShape,
-                            ambientColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Black.copy(alpha = 0.12f),
-                            spotColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.16f)
-                        )
-                        .clip(cardShape)
-                        .combinedClickable(
-                            interactionSource = interactionSource,
-                            indication = null,
-                            onClick = { handleEntryClick(entry) },
-                            onLongClick = { enterMultiSelect(entry) }
-                        )
-                        .border(
-                            width = if (selected) 2.dp else 1.dp,
-                            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
-                            shape = cardShape
+                key(entry.sourceUrl) {
+                    val selected = entry.sourceUrl in selectedSourceUrls
+                    val cardShape = RoundedCornerShape(24.dp)
+                    val interactionSource = remember(entry.sourceUrl) { MutableInteractionSource() }
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .pressScale(interactionSource, pressedScale = 0.98f)
+                            .shadow(
+                                elevation = if (selected) 10.dp else 16.dp,
+                                shape = cardShape,
+                                ambientColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.18f) else Color.Black.copy(alpha = 0.12f),
+                                spotColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.22f) else Color.Black.copy(alpha = 0.16f)
+                            )
+                            .clip(cardShape)
+                            .combinedClickable(
+                                interactionSource = interactionSource,
+                                indication = null,
+                                onClick = { handleEntryClick(entry) },
+                                onLongClick = { enterMultiSelect(entry) }
+                            )
+                            .border(
+                                width = if (selected) 2.dp else 1.dp,
+                                color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f),
+                                shape = cardShape
+                            ),
+                        shape = cardShape,
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
                         ),
-                    shape = cardShape,
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-                ) {
-                    Column(modifier = Modifier.padding(20.dp)) {
-                        Text(
-                            entry.title,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
-                            fontWeight = FontWeight.Medium
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            text = listOf(
-                                formatHistoryTime(entry.parsedAt),
-                                platformDisplayName(entry.platform),
-                                resolutionDisplayName(entry.resolution),
-                                formatBitRate(entry.bitRate),
-                                mediaTypeDisplayName(entry.mediaType),
-                                formatMediaSize(entry.sizeBytes)
-                            ).filter { it.isNotBlank() }.joinToString(" · "),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        Text(
-                            entry.sourceUrl,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(14.dp),
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            HistoryThumbnail(entry)
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    entry.title,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = listOf(
+                                        formatHistoryTime(entry.parsedAt),
+                                        platformDisplayName(entry.platform),
+                                        resolutionDisplayName(entry.resolution),
+                                        formatBitRate(entry.bitRate),
+                                        mediaTypeDisplayName(entry.mediaType),
+                                        formatMediaSize(entry.sizeBytes)
+                                    ).filter { it.isNotBlank() }.joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(6.dp))
+                                Text(
+                                    entry.sourceUrl,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -2540,15 +2747,71 @@ private fun HistoryScreen(
 }
 
 @Composable
+private fun HistoryThumbnail(entry: ParseHistoryEntry) {
+    val fallbackCacheKey = remember(entry.downloadUrl) { "history:${entry.downloadUrl}" }
+    var bitmap by remember(entry.coverUrl, entry.downloadUrl) {
+        mutableStateOf(
+            entry.coverUrl?.let { url ->
+                synchronized(previewBitmapCache) { previewBitmapCache.get(url) }
+            } ?: synchronized(previewBitmapCache) { previewBitmapCache.get(fallbackCacheKey) }
+        )
+    }
+    LaunchedEffect(entry.coverUrl, entry.downloadUrl) {
+        if (bitmap != null) return@LaunchedEffect
+        val (loaded, usedFallback) = withContext(Dispatchers.IO) {
+            val cover = loadPreviewBitmap(entry.coverUrl)
+            if (cover != null) {
+                cover to false
+            } else {
+                val frame = if (mediaTypeDisplayName(entry.mediaType) == "视频") {
+                    loadVideoFirstFrame(entry.downloadUrl)
+                } else {
+                    null
+                }
+                frame to true
+            }
+        }
+        if (loaded != null) {
+            if (usedFallback) {
+                synchronized(previewBitmapCache) { previewBitmapCache.put(fallbackCacheKey, loaded) }
+            }
+            bitmap = loaded
+        }
+    }
+    Box(
+        modifier = Modifier
+            .size(width = 104.dp, height = 72.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+        contentAlignment = Alignment.Center
+    ) {
+        bitmap?.let {
+            Image(
+                bitmap = it.asImageBitmap(),
+                contentDescription = "视频封面",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop
+            )
+        } ?: Icon(
+            Icons.Outlined.PlayArrow,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+@Composable
 private fun SettingsScreen(
     isActive: Boolean,
     darkTheme: Boolean,
     accentHue: Float,
+    uiScale: Float,
     appleFloatingNav: Boolean,
     notificationsEnabled: Boolean,
     autoPasteParseEnabled: Boolean,
     onThemeChange: (Boolean) -> Unit,
     onAccentHueChange: (Float) -> Unit,
+    onUiScaleChange: (Float) -> Unit,
     onAppleFloatingNavChange: (Boolean) -> Unit,
     onNotificationsChange: (Boolean) -> Unit,
     onAutoPasteParseChange: (Boolean) -> Unit,
@@ -2601,6 +2864,12 @@ private fun SettingsScreen(
                 onClick = { pageName = SettingsPage.Tutorials.name }
             )
             SettingsEntry(
+                icon = Icons.Outlined.Forum,
+                title = "交流反馈",
+                summary = "加入 QQ 群进行问题反馈",
+                onClick = { pageName = SettingsPage.Feedback.name }
+            )
+            SettingsEntry(
                 icon = Icons.Outlined.Info,
                 title = "关于本 APP",
                 summary = "制作人：春日大阪",
@@ -2617,6 +2886,7 @@ private fun SettingsScreen(
                         SettingsPage.Downloads -> "下载与通知"
                         SettingsPage.Automation -> "自动粘贴与解析"
                         SettingsPage.Tutorials -> "解析教程与支持"
+                        SettingsPage.Feedback -> "交流反馈"
                         SettingsPage.About -> "关于本 APP"
                         SettingsPage.Main -> "设置"
                     },
@@ -2625,6 +2895,7 @@ private fun SettingsScreen(
                 )
             }
             if (page == SettingsPage.Theme) {
+                var pendingUiScale by remember(uiScale) { mutableFloatStateOf(uiScale) }
                 GlassCard {
                     Text("主题模式", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
                     Spacer(Modifier.height(12.dp))
@@ -2651,6 +2922,26 @@ private fun SettingsScreen(
                             Text("将底部导航显示为悬浮圆角样式", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Switch(checked = appleFloatingNav, onCheckedChange = onAppleFloatingNavChange)
+                    }
+                    Spacer(Modifier.height(14.dp))
+                    Spacer(Modifier.height(20.dp))
+                    Text("界面缩放", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+                    Spacer(Modifier.height(6.dp))
+                    Text("默认跟随系统，松开滑块后应用界面大小", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(8.dp))
+                    CylinderScaleControl(
+                        value = pendingUiScale,
+                        onValueChange = { pendingUiScale = it },
+                        onValueChangeFinished = {
+                            if (pendingUiScale != uiScale) onUiScaleChange(pendingUiScale)
+                        }
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("80%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Spacer(Modifier.weight(1f))
+                        Text("${(pendingUiScale * 100).roundToInt()}%", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.weight(1f))
+                        Text("130%", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             } else if (page == SettingsPage.Downloads) {
@@ -2699,6 +2990,44 @@ private fun SettingsScreen(
                 }
             } else if (page == SettingsPage.Tutorials) {
                 TutorialSupportContent()
+            } else if (page == SettingsPage.Feedback) {
+                var qqCopied by rememberSaveable { mutableStateOf(false) }
+                GlassCard {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "QQ群号：",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            QQ_GROUP_NUMBER,
+                            modifier = Modifier.clickable {
+                                context.getSystemService(ClipboardManager::class.java)
+                                    ?.setPrimaryClip(ClipData.newPlainText("QQ群号", QQ_GROUP_NUMBER))
+                                qqCopied = true
+                            },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        if (qqCopied) {
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "已复制",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(16.dp))
+                    Text(
+                        "QQ交流群图片",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    FeedbackGroupImage()
+                }
             } else if (page == SettingsPage.About) {
                 GlassCard {
                     Text("关于本 APP", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
@@ -2745,6 +3074,62 @@ private fun SettingsScreen(
     }
 }
 
+@Composable
+private fun CylinderScaleControl(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit
+) {
+    val min = 0.8f
+    val max = 1.3f
+    val activeColor = MaterialTheme.colorScheme.primary
+    val thumbColor = MaterialTheme.colorScheme.surface
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .pointerInput(Unit) {
+                detectDragGestures(
+                    onDragStart = { position ->
+                        val next = (min + (position.x / size.width) * (max - min)).coerceIn(min, max)
+                        onValueChange(next)
+                    },
+                    onDragEnd = onValueChangeFinished,
+                    onDragCancel = onValueChangeFinished,
+                    onDrag = { change, _ ->
+                        val next = (min + (change.position.x / size.width) * (max - min)).coerceIn(min, max)
+                        onValueChange(next)
+                        change.consume()
+                    }
+                )
+            }
+            .semantics { contentDescription = "界面缩放调节" },
+        contentAlignment = Alignment.CenterStart
+    ) {
+        val progress = ((value - min) / (max - min)).coerceIn(0f, 1f)
+        Canvas(Modifier.fillMaxSize()) {
+            val radius = 8.dp.toPx()
+            val thumbRadius = 9.dp.toPx()
+            val startX = thumbRadius
+            val endX = size.width - thumbRadius
+            val thumbX = startX + (endX - startX) * progress
+            drawRoundRect(
+                color = activeColor,
+                topLeft = androidx.compose.ui.geometry.Offset(startX, center.y - radius),
+                size = androidx.compose.ui.geometry.Size((thumbX - startX).coerceAtLeast(radius * 2f), radius * 2f),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(radius, radius)
+            )
+            drawCircle(thumbColor, thumbRadius, androidx.compose.ui.geometry.Offset(thumbX, center.y))
+            drawCircle(
+                activeColor,
+                thumbRadius,
+                androidx.compose.ui.geometry.Offset(thumbX, center.y),
+                style = Stroke(width = 2.dp.toPx())
+            )
+        }
+    }
+}
+
 private data class TutorialSupportItem(
     val name: String,
     val iconRes: Int,
@@ -2755,6 +3140,12 @@ private data class TutorialSupportItem(
 private const val SHARE_LINK_TUTORIAL = "复制 App 内的分享链接，回到本 APP 粘贴解析即可"
 
 private val tutorialSupportItems = listOf(
+    TutorialSupportItem(
+        name = "哔哩哔哩",
+        iconRes = R.drawable.icon_bilibili,
+        capability = "无水印解析哔哩哔哩视频",
+        tutorial = SHARE_LINK_TUTORIAL
+    ),
     TutorialSupportItem(
         name = "皮皮虾",
         iconRes = R.drawable.icon_pipixia,
@@ -2944,6 +3335,7 @@ private fun JiquPreview() {
         JiquApp(
             darkTheme = false,
             accentHue = 196f,
+            uiScale = 1f,
             appleFloatingNav = true,
             notificationsEnabled = true,
             autoPasteParseEnabled = true,
@@ -2953,6 +3345,7 @@ private fun JiquPreview() {
             onHistoryRecorded = {},
             onThemeChange = {},
             onAccentHueChange = {},
+            onUiScaleChange = {},
             onAppleFloatingNavChange = {},
             onNotificationsChange = {},
             onAutoPasteParseChange = {},

@@ -14,10 +14,12 @@ internal object AppPreferences {
     const val FILE = "app_settings"
     const val DARK_THEME = "dark_theme"
     const val ACCENT_HUE = "accent_hue"
+    const val UI_SCALE = "ui_scale"
     const val APPLE_FLOATING_NAV = "apple_floating_nav"
     const val DOWNLOAD_COMPLETION_NOTIFICATIONS = "download_completion_notifications"
     const val AUTO_PASTE_PARSE = "auto_paste_parse"
     const val AUTOMATIC_UPDATE_CHECK_IGNORED = "automatic_update_check_ignored"
+    const val FEEDBACK_INTRO_CONFIRMED = "feedback_intro_confirmed"
     const val DOWNLOAD_CHANNEL_MIGRATED = "download_channel_migrated_v8"
 }
 

@@ -7,10 +7,14 @@ import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.jiqu.lite.data.parseMediaUrl
@@ -107,6 +111,63 @@ class ExampleInstrumentedTest {
     }
 
     @Test
+    fun downloadsRangeMediaDirectlyToMediaStore() = verifyRangeDownload(
+        directThresholdBytes = 1L,
+        expectedStrategy = DownloadStorageStrategy.DIRECT_MEDIA_STORE
+    )
+
+    @Test
+    fun downloadsRangeMediaThroughStaging() = verifyRangeDownload(
+        directThresholdBytes = Long.MAX_VALUE,
+        expectedStrategy = DownloadStorageStrategy.STAGED
+    )
+
+    private fun verifyRangeDownload(
+        directThresholdBytes: Long,
+        expectedStrategy: DownloadStorageStrategy
+    ) = runBlocking {
+        val media = parseMediaUrl("https://b23.tv/EwbHVAL").getOrThrow()
+        val expectedSize = checkNotNull(media.sizeBytes)
+        val fileName = "android_test_${expectedStrategy.name.lowercase()}_${System.currentTimeMillis()}"
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val displayName = "$fileName.${media.fileExtension}"
+
+        try {
+            val strategy = MultipartDownloader(
+                application = context,
+                directMediaStoreThresholdBytes = directThresholdBytes
+            ).download(
+                DownloadRequest(
+                    url = media.downloadUrl,
+                    fileName = fileName,
+                    extension = media.fileExtension,
+                    expectedSizeBytes = expectedSize
+                )
+            ) { _, _, _ -> Unit }
+
+            assertEquals(expectedStrategy, strategy)
+            checkNotNull(
+                context.contentResolver.query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    arrayOf(MediaStore.MediaColumns.SIZE),
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                    arrayOf(displayName),
+                    null
+                )
+            ).use { cursor ->
+                assertTrue("download was not written to MediaStore", cursor.moveToFirst())
+                assertEquals(expectedSize, cursor.getLong(0))
+            }
+        } finally {
+            context.contentResolver.delete(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                arrayOf(displayName)
+            )
+        }
+    }
+
+    @Test
     fun parsesKuaishouThroughDedicatedGateway() = runBlocking {
         val media = parseMediaUrl("https://v.kuaishou.com/KAjGG5zb").getOrThrow()
 
@@ -122,9 +183,28 @@ class ExampleInstrumentedTest {
     }
 
     @Test
-    fun parseSurvivesRecreationAndBottomNavigation() {
+    fun parseButtonSwitchesDirectlyToLoadingState() {
+        if (composeRule.onAllNodesWithText("忽略").fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithText("忽略").performClick()
+            composeRule.onNodeWithText("确定").performClick()
+        }
+
         composeRule.onNode(hasSetTextAction())
             .performTextInput("https://v.douyin.com/XBwlKFr1ya0/")
+        composeRule.onNodeWithText("开始解析").performClick()
+
+        composeRule.onNodeWithText("正在解析").assertIsDisplayed()
+    }
+
+    @Test
+    fun parseSurvivesRecreationAndBottomNavigation() {
+        if (composeRule.onAllNodesWithText("忽略").fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithText("忽略").performClick()
+            composeRule.onNodeWithText("确定").performClick()
+        }
+        composeRule.onNodeWithText("解析").performClick()
+        composeRule.onNode(hasSetTextAction())
+            .performTextReplacement("https://v.douyin.com/XBwlKFr1ya0/")
         composeRule.onNodeWithText("开始解析").performClick()
 
         composeRule.activityRule.scenario.recreate()
@@ -146,6 +226,24 @@ class ExampleInstrumentedTest {
             composeRule.onAllNodesWithText("选择下载清晰度").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("选择下载清晰度").assertIsDisplayed()
+    }
+
+    @Test
+    fun floatingNavigationRespondsToImmediateDrag() {
+        if (composeRule.onAllNodesWithText("忽略").fetchSemanticsNodes().isNotEmpty()) {
+            composeRule.onNodeWithText("忽略").performClick()
+            composeRule.onNodeWithText("确定").performClick()
+        }
+
+        composeRule.onNodeWithContentDescription("解析").performTouchInput {
+            swipe(
+                start = center,
+                end = center.copy(x = center.x + 650f),
+                durationMillis = 180
+            )
+        }
+
+        composeRule.onNodeWithText("主题与外观").assertIsDisplayed()
     }
 
     @Test

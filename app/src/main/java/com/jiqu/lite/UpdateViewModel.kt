@@ -93,6 +93,9 @@ private fun String.toVersionParts(): List<Int>? {
     }
 }
 
+internal fun isApkReleaseAssetName(name: String): Boolean =
+    name.substringBefore('?').endsWith(".apk", ignoreCase = true)
+
 private sealed interface SourceResult {
     data class Release(val update: AppUpdate) : SourceResult
     data object NoRelease : SourceResult
@@ -192,7 +195,7 @@ internal class ReleaseUpdateClient {
     private fun JSONArray.findApkAsset(): JSONObject? =
         (0 until length()).asSequence()
             .mapNotNull(::optJSONObject)
-            .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
+            .filter { isApkReleaseAssetName(it.optString("name")) }
             .sortedByDescending { it.optString("name").contains("signed", ignoreCase = true) }
             .firstOrNull()
 

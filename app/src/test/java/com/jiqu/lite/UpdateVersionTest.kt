@@ -25,4 +25,12 @@ class UpdateVersionTest {
         assertFalse(isTrustedUpdateUrl("https://gitee.com/DIOT486/JIQU2/attach_files/123/download/app.apk"))
         assertFalse(isTrustedUpdateUrl("https://gh-proxy.com/https://github.com/another/repo/releases/download/v2/app.apk"))
     }
+
+    @Test
+    fun acceptsAnyApkAssetFilename() {
+        assertTrue(isApkReleaseAssetName("app-release.apk"))
+        assertTrue(isApkReleaseAssetName("JIQU-v2.1.1-universal.apk"))
+        assertTrue(isApkReleaseAssetName("release-2026-09-10.APK"))
+        assertFalse(isApkReleaseAssetName("release-notes.txt"))
+    }
 }
