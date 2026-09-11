@@ -8,9 +8,7 @@
 ## 如果不喜欢默认的apple风格底栏的话，可去设置主题与外观中关闭悬浮底栏开关
 <img width="2696" height="1280" alt="9b5b511aa69d683ff575bf493dade807" src="https://github.com/user-attachments/assets/50e3488e-c0f1-4f7e-b882-8ddc1228227b" />
 
-# 当前版本
-
-`2.1.2`
+# 当前版本  2.1.2
 
 # 本次主要修复和完善了以下问题：
  即取 2.1.1 更新内容
