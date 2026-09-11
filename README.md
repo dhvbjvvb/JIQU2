@@ -34,14 +34,15 @@
 - 下载历史记录
 - 下载完成通知
 - 深色模式、主题色与悬浮底栏设置
-  
+
+# 交流反馈
+## <img width="1348" height="1657" alt="交流反馈" src="https://github.com/user-attachments/assets/127597de-dd5d-4d03-9b8e-2ebbeaba8da4" />
 
 # 开源地址
-
+github:
 https://github.com/dhvbjvvb/JIQU2
 
 蓝奏云更新地址：
-
 https://wwbjl.lanzout.com/b01d77wdje  （提取码:ccvd）
 
 # 许可证
