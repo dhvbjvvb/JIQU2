@@ -36,7 +36,7 @@
 - 深色模式、主题色与悬浮底栏设置
 
 # 交流反馈
-## <img width="1348" height="1657" alt="交流反馈" src="https://github.com/user-attachments/assets/127597de-dd5d-4d03-9b8e-2ebbeaba8da4" />
+## <img width="348" height="657" alt="交流反馈" src="https://github.com/user-attachments/assets/127597de-dd5d-4d03-9b8e-2ebbeaba8da4" />
 
 # 开源地址
 github:
