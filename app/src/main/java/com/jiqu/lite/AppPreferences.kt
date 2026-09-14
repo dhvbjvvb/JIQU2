@@ -19,8 +19,11 @@ internal object AppPreferences {
     const val DOWNLOAD_COMPLETION_NOTIFICATIONS = "download_completion_notifications"
     const val AUTO_PASTE_PARSE = "auto_paste_parse"
     const val AUTOMATIC_UPDATE_CHECK_IGNORED = "automatic_update_check_ignored"
-    const val FEEDBACK_INTRO_CONFIRMED = "feedback_intro_confirmed"
     const val DOWNLOAD_CHANNEL_MIGRATED = "download_channel_migrated_v8"
+    const val LAST_LAUNCHED_VERSION_CODE = "last_launched_version_code"
+    const val PENDING_UPGRADE_NOTICE_VERSION_CODE = "pending_upgrade_notice_version_code"
+    const val PENDING_UPGRADE_NOTICE_UPDATE_TIME = "pending_upgrade_notice_update_time"
+    const val ACKNOWLEDGED_UPGRADE_NOTICE_UPDATE_TIME = "acknowledged_upgrade_notice_update_time"
 }
 
 /** Migrates the former download-notification switch to completion notifications once. */

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">izuiyou.com</domain>
+        <domain includeSubdomains="true">xiaochuankeji.cn</domain>
+        <domain includeSubdomains="true">ixiaochuan.cn</domain>
+        <domain includeSubdomains="true">xhscdn.com</domain>
+        <domain includeSubdomains="true">kwimgs.com</domain>
+        <domain includeSubdomains="true">yximgs.com</domain>
+    </domain-config>
+</network-security-config>

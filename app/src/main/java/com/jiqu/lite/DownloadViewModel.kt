@@ -43,8 +43,8 @@ import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 
-private const val MAX_DOWNLOAD_THREADS = 16
-private const val MAX_DOWNLOAD_RANGES = 256
+private const val MAX_DOWNLOAD_THREADS = 24
+private const val MAX_DOWNLOAD_RANGES = 384
 private const val SMALL_FILE_BYTES = 20L * 1024L * 1024L
 private const val MEDIUM_FILE_BYTES = 200L * 1024L * 1024L
 private const val LARGE_FILE_BYTES = 512L * 1024L * 1024L
@@ -59,7 +59,8 @@ sealed interface DownloadUiState {
         val fileName: String,
         val downloadedBytes: Long,
         val totalBytes: Long,
-        val threadCount: Int
+        val threadCount: Int,
+        val bytesPerSecond: Long
     ) : DownloadUiState
     data class Saving(val fileName: String) : DownloadUiState
     data class Success(val fileName: String) : DownloadUiState
@@ -89,6 +90,7 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
         downloading = true
         uiState = DownloadUiState.Preparing(request.fileName)
         viewModelScope.launch {
+            val speedTracker = DownloadSpeedTracker()
             try {
                 MultipartDownloader(getApplication<Application>()).download(
                     request = request,
@@ -98,8 +100,15 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
                         }
                     }
                 ) { downloaded, total, threads ->
+                    val bytesPerSecond = speedTracker.update(downloaded)
                     withContext(Dispatchers.Main.immediate) {
-                        uiState = DownloadUiState.Running(request.fileName, downloaded, total, threads)
+                        uiState = DownloadUiState.Running(
+                            request.fileName,
+                            downloaded,
+                            total,
+                            threads,
+                            bytesPerSecond
+                        )
                     }
                 }
                 uiState = DownloadUiState.Success(request.fileName)
@@ -156,10 +165,44 @@ private data class ByteRange(val start: Long, val endInclusive: Long)
 
 internal fun recommendedDownloadThreads(totalBytes: Long): Int = when {
     totalBytes < SMALL_FILE_BYTES -> 1
-    totalBytes < MEDIUM_FILE_BYTES -> 4
-    totalBytes < LARGE_FILE_BYTES -> 8
-    totalBytes < HUGE_FILE_BYTES -> 12
+    totalBytes < MEDIUM_FILE_BYTES -> 6
+    totalBytes < LARGE_FILE_BYTES -> 10
+    totalBytes < HUGE_FILE_BYTES -> 16
     else -> MAX_DOWNLOAD_THREADS
+}
+
+internal class DownloadSpeedTracker(
+    private val minimumSampleMillis: Long = 240L,
+    private val smoothingFactor: Double = 0.35
+) {
+    private var lastBytes = 0L
+    private var lastSampleMillis = Long.MIN_VALUE
+    private var smoothedBytesPerSecond = 0.0
+
+    fun update(
+        downloadedBytes: Long,
+        nowMillis: Long = System.nanoTime() / 1_000_000L
+    ): Long {
+        if (lastSampleMillis == Long.MIN_VALUE || downloadedBytes < lastBytes) {
+            lastBytes = downloadedBytes
+            lastSampleMillis = nowMillis
+            smoothedBytesPerSecond = 0.0
+            return 0L
+        }
+        val elapsedMillis = nowMillis - lastSampleMillis
+        if (elapsedMillis < minimumSampleMillis) return smoothedBytesPerSecond.toLong()
+
+        val copiedBytes = (downloadedBytes - lastBytes).coerceAtLeast(0L)
+        val instantSpeed = copiedBytes * 1_000.0 / elapsedMillis.coerceAtLeast(1L)
+        smoothedBytesPerSecond = if (smoothedBytesPerSecond <= 0.0) {
+            instantSpeed
+        } else {
+            smoothedBytesPerSecond * (1.0 - smoothingFactor) + instantSpeed * smoothingFactor
+        }
+        lastBytes = downloadedBytes
+        lastSampleMillis = nowMillis
+        return smoothedBytesPerSecond.toLong().coerceAtLeast(0L)
+    }
 }
 
 internal fun calculateByteRanges(
@@ -310,6 +353,11 @@ internal class MultipartDownloader(
                 totalBytes = rangeTotal ?: expectedSize ?: contentLength.takeUnless { responseCode == HttpURLConnection.HTTP_PARTIAL }?.coerceAtLeast(0L) ?: 0L,
                 supportsRanges = responseCode == HttpURLConnection.HTTP_PARTIAL && rangeTotal != null
             )
+        } catch (_: IOException) {
+            // Some signed media CDNs reject range probes while allowing a normal
+            // stream request. Continue with the single-stream path instead of
+            // failing before the actual download starts.
+            RemoteFileInfo(totalBytes = expectedSize ?: 0L, supportsRanges = false)
         } finally {
             connection.disconnect()
         }
@@ -627,12 +675,59 @@ internal class MultipartDownloader(
             readTimeout = 90_000
             instanceFollowRedirects = true
             setRequestProperty("Accept-Encoding", "identity")
-            setRequestProperty("User-Agent", "Mozilla/5.0 (Android) Jiqu/1.0")
-            if (remoteUrl.host.equals("bilivideo.com", ignoreCase = true) ||
-                remoteUrl.host.endsWith(".bilivideo.com", ignoreCase = true)
-            ) {
+            applyMediaCdnHeaders(remoteUrl)
+        }
+    }
+
+    /**
+     * Signed Toutiao/Xigua CDN URLs validate the browser identity and source
+     * page. Keep these headers on range probes and every subsequent request;
+     * otherwise the probe itself is rejected with 403 before downloading starts.
+     */
+    private fun HttpURLConnection.applyMediaCdnHeaders(remoteUrl: URL) {
+        val host = remoteUrl.host.lowercase()
+        when {
+            host == "bilivideo.com" || host.endsWith(".bilivideo.com") -> {
+                setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
                 setRequestProperty("Referer", "https://www.bilibili.com/")
             }
+            host == "ixigua.com" || host.endsWith(".ixigua.com") ||
+                host == "toutiao.com" || host.endsWith(".toutiao.com") -> {
+                // Xigua/Toutiao's req-auth check rejects app-specific UAs.
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://www.toutiao.com/")
+                setRequestProperty("Origin", "https://www.toutiao.com")
+            }
+            host == "ixiaochuan.cn" || host.endsWith(".ixiaochuan.cn") -> {
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://www.pipigx.com/")
+                setRequestProperty("Origin", "https://www.pipigx.com")
+            }
+            host == "ppxvod.com" || host.endsWith(".ppxvod.com") -> {
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://h5.pipix.com/")
+                setRequestProperty("Origin", "https://h5.pipix.com")
+            }
+            host == "xhscdn.com" || host.endsWith(".xhscdn.com") ||
+                host == "xhscdn.net" || host.endsWith(".xhscdn.net") -> {
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://www.xiaohongshu.com/")
+                setRequestProperty("Origin", "https://www.xiaohongshu.com")
+            }
+            host == "weibocdn.com" || host.endsWith(".weibocdn.com") ||
+                host == "sinaimg.cn" || host.endsWith(".sinaimg.cn") -> {
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://weibo.com/")
+                setRequestProperty("Origin", "https://weibo.com")
+            }
+            host == "izuiyou.com" || host.endsWith(".izuiyou.com") ||
+                host == "xiaochuankeji.cn" || host.endsWith(".xiaochuankeji.cn") ||
+                host == "zuiyou.com" || host.endsWith(".zuiyou.com") -> {
+                setRequestProperty("User-Agent", MEDIA_BROWSER_USER_AGENT)
+                setRequestProperty("Referer", "https://www.izuiyou.com/")
+                setRequestProperty("Origin", "https://www.izuiyou.com")
+            }
+            else -> setRequestProperty("User-Agent", DEFAULT_USER_AGENT)
         }
     }
 
@@ -650,7 +745,10 @@ internal class MultipartDownloader(
     }
 
     private companion object {
-        const val NETWORK_BUFFER_SIZE = 256 * 1024
+        const val NETWORK_BUFFER_SIZE = 512 * 1024
         const val COPY_BUFFER_SIZE = 1024 * 1024
+        const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Android) Jiqu/1.0"
+        const val MEDIA_BROWSER_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
     }
 }

@@ -72,7 +72,6 @@ import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Folder
-import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Search
@@ -130,7 +129,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -156,18 +154,22 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import com.jiqu.lite.ui.theme.JiquTheme
 import com.jiqu.lite.data.ParsedMedia
 import com.jiqu.lite.data.MediaDownloadOption
@@ -192,8 +194,7 @@ import kotlin.math.roundToInt
 
 private enum class AppDestination(val label: String) { Parse("解析"), History("历史"), Settings("设置") }
 private enum class SettingsPage { Main, Theme, Downloads, Automation, Tutorials, Feedback, About }
-
-private const val QQ_GROUP_NUMBER = "1124541108"
+private const val FEEDBACK_QQ_GROUP = "1124541108"
 
 internal fun destinationIndexForPosition(positionX: Float, width: Float, itemCount: Int): Int {
     if (itemCount <= 1 || width <= 0f) return 0
@@ -209,6 +210,35 @@ private fun extractHttpUrl(text: String): String? = httpUrlPattern.find(text)
     ?.trimEnd('.', ',', '!', '?', ';', ':', '。', '，', '！', '？', '；', '：', ')', ']', '}')
     ?.takeIf { url -> Uri.parse(url).host?.isNotBlank() == true }
     ?.let(::normalizeMediaSourceUrl)
+
+private fun mediaRequestHeaders(mediaUrl: String): Map<String, String> {
+    val host = Uri.parse(mediaUrl).host.orEmpty().lowercase()
+    val referer = when {
+        host == "ixiaochuan.cn" || host.endsWith(".ixiaochuan.cn") -> "https://www.pipigx.com/"
+        host == "izuiyou.com" || host.endsWith(".izuiyou.com") ||
+            host == "xiaochuankeji.cn" || host.endsWith(".xiaochuankeji.cn") ||
+            host == "zuiyou.com" || host.endsWith(".zuiyou.com") -> "https://www.izuiyou.com/"
+        host == "xiaohongshu.com" || host.endsWith(".xiaohongshu.com") ||
+            host == "xhslink.com" || host.endsWith(".xhslink.com") ||
+            host == "xhslink.cn" || host.endsWith(".xhslink.cn") ||
+            host == "xiaohongshu.net" || host.endsWith(".xiaohongshu.net") ||
+            host == "xhscdn.com" || host.endsWith(".xhscdn.com") ||
+            host == "xhscdn.net" || host.endsWith(".xhscdn.net") -> "https://www.xiaohongshu.com/"
+        host == "pipigx.com" || host.endsWith(".pipigx.com") ||
+            host == "pipigx.cn" || host.endsWith(".pipigx.cn") ||
+            host == "ippzone.com" || host.endsWith(".ippzone.com") -> "https://www.pipigx.com/"
+        host == "ppxvod.com" || host.endsWith(".ppxvod.com") -> "https://h5.pipix.com/"
+        host == "kwimgs.com" || host.endsWith(".kwimgs.com") ||
+            host == "yximgs.com" || host.endsWith(".yximgs.com") -> "https://www.kuaishou.com/"
+        host == "weibocdn.com" || host.endsWith(".weibocdn.com") ||
+            host == "sinaimg.cn" || host.endsWith(".sinaimg.cn") -> "https://weibo.com/"
+        else -> "https://www.douyin.com/"
+    }
+    return mapOf(
+        "User-Agent" to "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
+        "Referer" to referer
+    )
+}
 
 private data class ParseHistoryEntry(
     val sourceUrl: String,
@@ -358,6 +388,15 @@ private fun mediaTypeDisplayName(mediaType: String): String = when (mediaType.lo
     else -> "视频"
 }
 
+private fun isVideoMediaUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    val normalized = url.lowercase()
+    return normalized.substringBefore('?').substringBefore('#').endsWith(".mp4") ||
+        normalized.substringBefore('?').substringBefore('#').endsWith(".m3u8") ||
+        normalized.contains("/video/") || normalized.contains("mime_type=video") ||
+        normalized.contains("video_url")
+}
+
 private fun formatMediaSize(sizeBytes: Long?): String = when {
     sizeBytes == null || sizeBytes <= 0 -> "待获取"
     sizeBytes >= 1_024L * 1_024 * 1_024 -> "%.2f GB".format(sizeBytes / (1_024.0 * 1_024 * 1_024))
@@ -370,6 +409,14 @@ private fun formatBitRate(bitRate: Long?): String = when {
     bitRate >= 1_000_000 -> "%.2f Mbps".format(bitRate / 1_000_000.0)
     bitRate >= 1_000 -> "%.0f Kbps".format(bitRate / 1_000.0)
     else -> "$bitRate bps"
+}
+
+private fun formatTransferSpeed(bytesPerSecond: Long): String = when {
+    bytesPerSecond <= 0L -> "正在测速"
+    bytesPerSecond >= 1_024L * 1_024 * 1_024 -> "%.2f GB/s".format(bytesPerSecond / (1_024.0 * 1_024 * 1_024))
+    bytesPerSecond >= 1_024L * 1_024 -> "%.2f MB/s".format(bytesPerSecond / (1_024.0 * 1_024))
+    bytesPerSecond >= 1_024L -> "%.1f KB/s".format(bytesPerSecond / 1_024.0)
+    else -> "$bytesPerSecond B/s"
 }
 
 private fun String.isUsableMediaUrl(): Boolean = runCatching {
@@ -771,13 +818,40 @@ private fun JiquApp(
     val preferences = remember(context.applicationContext) {
         context.applicationContext.getSharedPreferences(AppPreferences.FILE, Context.MODE_PRIVATE)
     }
-    var feedbackIntroStage by rememberSaveable {
-        mutableIntStateOf(
-            if (preferences.getBoolean(AppPreferences.FEEDBACK_INTRO_CONFIRMED, false)) 0 else 1
-        )
-    }
     val lifecycle = (context as? ComponentActivity)?.lifecycle
     val clipboardManager = context.getSystemService(ClipboardManager::class.java)
+    var showUpgradeNotice by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        val currentVersionCode = BuildConfig.VERSION_CODE
+        val packageInfo = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        val currentUpdateTime = packageInfo?.lastUpdateTime ?: 0L
+        val firstInstallTime = packageInfo?.firstInstallTime ?: currentUpdateTime
+        val hasLastVersion = preferences.contains(AppPreferences.LAST_LAUNCHED_VERSION_CODE)
+        val lastVersionCode = preferences.getInt(AppPreferences.LAST_LAUNCHED_VERSION_CODE, -1)
+        val acknowledgedUpdateTime = preferences.getLong(AppPreferences.ACKNOWLEDGED_UPGRADE_NOTICE_UPDATE_TIME, 0L)
+        val pendingUpdateTime = preferences.getLong(AppPreferences.PENDING_UPGRADE_NOTICE_UPDATE_TIME, 0L)
+        val upgraded = if (hasLastVersion) {
+            currentVersionCode > lastVersionCode
+        } else {
+            // Existing installs from before this rule had no stored version. Android's
+            // update timestamp lets us distinguish them from a genuinely fresh install.
+            runCatching {
+                val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                packageInfo.lastUpdateTime > packageInfo.firstInstallTime
+            }.getOrDefault(false)
+        }
+        val updateDetected = upgraded && currentUpdateTime > firstInstallTime && currentUpdateTime != acknowledgedUpdateTime
+        val editor = preferences.edit().putInt(AppPreferences.LAST_LAUNCHED_VERSION_CODE, currentVersionCode)
+        if (updateDetected) {
+            editor
+                .putInt(AppPreferences.PENDING_UPGRADE_NOTICE_VERSION_CODE, currentVersionCode)
+                .putLong(AppPreferences.PENDING_UPGRADE_NOTICE_UPDATE_TIME, currentUpdateTime)
+        }
+        editor.apply()
+        showUpgradeNotice =
+            (preferences.getInt(AppPreferences.PENDING_UPGRADE_NOTICE_VERSION_CODE, -1) == currentVersionCode) &&
+                (pendingUpdateTime == 0L || pendingUpdateTime == currentUpdateTime || updateDetected)
+    }
     val latestParsing by rememberUpdatedState(parseUiState.parsing)
     val latestOnSourceUrlChange by rememberUpdatedState(onSourceUrlChange)
     val latestOnParse by rememberUpdatedState(onParse)
@@ -881,8 +955,29 @@ private fun JiquApp(
         }
     ) { innerPadding ->
         Box(Modifier.fillMaxSize().background(animatedBackground)) {
-            Box(Modifier.fillMaxSize().padding(innerPadding)) {
-                when (destination) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .clipToBounds()
+            ) {
+                AnimatedContent(
+                    targetState = destination,
+                    transitionSpec = {
+                        val movingForward = targetState.ordinal > initialState.ordinal
+                        val enterDirection = if (movingForward) {
+                            AnimatedContentTransitionScope.SlideDirection.Left
+                        } else {
+                            AnimatedContentTransitionScope.SlideDirection.Right
+                        }
+                        (slideIntoContainer(enterDirection, animationSpec = tween(260)) +
+                            fadeIn(animationSpec = tween(210, delayMillis = 25))) togetherWith
+                            (slideOutOfContainer(enterDirection, animationSpec = tween(220)) +
+                                fadeOut(animationSpec = tween(150)))
+                    },
+                    label = "destination-content-transition"
+                ) { targetDestination ->
+                    when (targetDestination) {
                     AppDestination.Parse -> ParseScreen(
                         modifier = Modifier.fillMaxSize(),
                         isActive = true,
@@ -924,6 +1019,7 @@ private fun JiquApp(
                         onCheckForUpdate = onCheckForUpdate,
                         modifier = Modifier.fillMaxSize()
                     )
+                    }
                 }
             }
             if (appleFloatingNav) {
@@ -938,28 +1034,69 @@ private fun JiquApp(
     if (downloadUiState !is DownloadUiState.Idle) {
         DownloadProgressDialog(downloadUiState, onDismissDownload)
     }
-    if (feedbackIntroStage == 0) {
-        UpdateStatusDialog(
-            state = updateUiState,
-            onDismiss = onDismissUpdate,
-            onRetryCheck = onCheckForUpdate,
-            onIgnore = onIgnoreAutomaticUpdates,
-            onDownload = onDownloadUpdate,
-            onSelectChannel = { update, useGitHub ->
-                onSelectUpdateChannel(update, useGitHub)
-            },
-            onContinueInstall = onContinueUpdateInstall
-        )
-    } else {
-        FirstLaunchFeedbackDialog(
-            stage = feedbackIntroStage,
-            onIgnore = { feedbackIntroStage = 2 },
-            onConfirm = {
-                preferences.edit().putBoolean(AppPreferences.FEEDBACK_INTRO_CONFIRMED, true).apply()
-                feedbackIntroStage = 0
+    UpdateStatusDialog(
+        state = updateUiState,
+        onDismiss = onDismissUpdate,
+        onRetryCheck = onCheckForUpdate,
+        onIgnore = onIgnoreAutomaticUpdates,
+        onDownload = onDownloadUpdate,
+        onSelectChannel = { update, useGitHub ->
+            onSelectUpdateChannel(update, useGitHub)
+        },
+        onContinueInstall = onContinueUpdateInstall
+    )
+    UpgradeFeedbackDialog(
+        visible = showUpgradeNotice,
+        onConfirm = {
+            showUpgradeNotice = false
+            val updateTime = preferences.getLong(AppPreferences.PENDING_UPGRADE_NOTICE_UPDATE_TIME, 0L)
+            preferences.edit()
+                .remove(AppPreferences.PENDING_UPGRADE_NOTICE_VERSION_CODE)
+                .remove(AppPreferences.PENDING_UPGRADE_NOTICE_UPDATE_TIME)
+                .putLong(AppPreferences.ACKNOWLEDGED_UPGRADE_NOTICE_UPDATE_TIME, updateTime)
+                .apply()
+        }
+    )
+}
+
+@Composable
+private fun UpgradeFeedbackDialog(
+    visible: Boolean,
+    onConfirm: () -> Unit
+) {
+    if (!visible) return
+    val context = LocalContext.current
+    AlertDialog(
+        onDismissRequest = {},
+        shape = RoundedCornerShape(24.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        title = { Text("交流反馈") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "如有问题及后续改进，请进QQ群反馈。群号为:",
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                Text(
+                    FEEDBACK_QQ_GROUP,
+                    modifier = Modifier
+                        .clickable {
+                            val clipboard = context.getSystemService(ClipboardManager::class.java)
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("QQ群号", FEEDBACK_QQ_GROUP))
+                        }
+                        .padding(vertical = 2.dp),
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.headlineSmall
+                )
             }
-        )
-    }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) { Text("确认") }
+        }
+    )
 }
 
 private fun loadVideoFirstFrame(url: String?): Bitmap? {
@@ -973,54 +1110,6 @@ private fun loadVideoFirstFrame(url: String?): Bitmap? {
             retriever.release()
         }
     }.getOrNull()
-}
-
-@Composable
-private fun FirstLaunchFeedbackDialog(
-    stage: Int,
-    onIgnore: () -> Unit,
-    onConfirm: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = {},
-        shape = RoundedCornerShape(24.dp),
-        containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        title = { Text(if (stage == 1) "交流反馈" else "提示") },
-        text = {
-            if (stage == 1) {
-                FeedbackGroupImage(constrainForDialog = true)
-            } else {
-                Text("可在设置中点击“交流反馈”加Q群进行问题反馈")
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = if (stage == 1) onIgnore else onConfirm) {
-                Text(if (stage == 1) "忽略" else "确定")
-            }
-        }
-    )
-}
-
-@Composable
-private fun FeedbackGroupImage(constrainForDialog: Boolean = false) {
-    val configuration = LocalConfiguration.current
-    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-        val naturalHeight = maxWidth * (1657f / 1348f)
-        val imageHeight = if (constrainForDialog) {
-            minOf(naturalHeight, configuration.screenHeightDp.dp * 0.52f)
-        } else {
-            naturalHeight
-        }
-        Image(
-            painter = painterResource(R.drawable.feedback_qq_group),
-            contentDescription = "QQ 交流群图片",
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(imageHeight)
-                .clip(RoundedCornerShape(16.dp)),
-            contentScale = ContentScale.Fit
-        )
-    }
 }
 
 @Composable
@@ -1272,15 +1361,11 @@ private fun FloatingNavigationBar(
     } else {
         restingPosition
     }
-    val restingIndicatorPosition by animateFloatAsState(
-        targetValue = restingPosition,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
+    val indicatorPosition by animateFloatAsState(
+        targetValue = indicatorTarget,
+        animationSpec = if (isDragging) snap() else tween(durationMillis = 140),
         label = "floating-navigation-indicator"
     )
-    val indicatorPosition = if (isDragging) indicatorTarget else restingIndicatorPosition
     val feedbackDestinationIndex = if (isDragging) dragDestinationIndex else destination.ordinal
 
     fun updateDragPosition(positionX: Float) {
@@ -1424,6 +1509,19 @@ private fun GlassCard(content: @Composable ColumnScope.() -> Unit) {
 }
 
 private fun selectPreviewOption(media: ParsedMedia): MediaDownloadOption {
+    val assetVideoUrls = media.assets.filter { it.isVideo || it.isLive }.mapTo(mutableSetOf()) {
+        it.option.downloadUrl
+    }
+    val videoOptions = media.downloadOptions.filter {
+        isVideoMediaUrl(it.downloadUrl) || it.downloadUrl in assetVideoUrls
+    }
+    if (videoOptions.isNotEmpty()) {
+        return videoOptions.maxWith(
+            compareBy<MediaDownloadOption> {
+                (it.width ?: 0).toLong() * (it.height ?: 0).toLong()
+            }.thenBy { it.bitRate ?: 0L }.thenBy { it.sizeBytes ?: 0L }
+        )
+    }
     val optionsWithDimensions = media.downloadOptions.filter {
         (it.width ?: 0) > 0 && (it.height ?: 0) > 0
     }
@@ -1450,6 +1548,14 @@ private fun MediaPreviewWindow(
     val previewOption = remember(media.downloadOptions) { selectPreviewOption(media) }
     val previewUrl = previewOption.downloadUrl
     val assets = media.assets
+    val mediaSaysVideo = mediaTypeDisplayName(media.mediaType) == "视频"
+    val hasVideoOption = mediaSaysVideo || assets.any { it.isVideo || it.isLive } ||
+        media.downloadOptions.any { isVideoMediaUrl(it.downloadUrl) }
+    val hasImageAssets = assets.any { !it.isVideo && !it.isLive && !isVideoMediaUrl(it.option.downloadUrl) }
+    val hasSelectableAssets = hasImageAssets && assets.size >= 2
+    // A player is reserved for links that contain video but no image assets.
+    // Mixed image/video posts are represented by selectable cover cards.
+    val hasVideoPreview = !hasImageAssets && (hasVideoOption || isVideoMediaUrl(previewUrl))
     var selectedAssets by remember(media.assets) { mutableStateOf(emptySet<Int>()) }
     var showDownloadDialog by remember(media.downloadUrl) { mutableStateOf(false) }
     var previewPlayer by remember(previewUrl) { mutableStateOf<MediaPlayer?>(null) }
@@ -1530,7 +1636,7 @@ private fun MediaPreviewWindow(
                 color = MaterialTheme.colorScheme.onSurface
             )
             Spacer(Modifier.height(12.dp))
-            if (assets.isNotEmpty()) {
+            if (hasImageAssets) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("已解析 ${assets.size} 项，点击卡片选择或取消", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     assets.chunked(3).forEachIndexed { rowIndex, row ->
@@ -1551,7 +1657,8 @@ private fun MediaPreviewWindow(
                         }
                     }
                 }
-            } else Box(
+            }
+            if (hasVideoPreview) Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(16f / 9f)
@@ -1620,10 +1727,7 @@ private fun MediaPreviewWindow(
                                         player.setDataSource(
                                             viewContext,
                                             Uri.parse(previewUrl),
-                                            mapOf(
-                                                "User-Agent" to "Mozilla/5.0 (Android) Jiqu/1.0",
-                                                "Referer" to "https://www.douyin.com/"
-                                            )
+                                            mediaRequestHeaders(previewUrl)
                                         )
                                         player.prepareAsync()
                                     }.onFailure {
@@ -1715,7 +1819,7 @@ private fun MediaPreviewWindow(
         }
         Spacer(Modifier.height(12.dp))
         MediaDetails(media)
-        if (assets.isEmpty()) {
+        if (hasVideoPreview) {
             Spacer(Modifier.height(12.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
@@ -1798,15 +1902,72 @@ private fun MediaPreviewWindow(
             }
         }
             Spacer(Modifier.height(14.dp))
-            Button(onClick = {
-                if (assets.isNotEmpty()) {
+            val downloadSelected: () -> Unit = {
+                if (hasImageAssets && selectedAssets.isNotEmpty()) {
                     selectedAssets.mapNotNull { assets.getOrNull(it)?.option }.forEach { onDownload(media, it) }
-                } else showDownloadDialog = true
-            }, enabled = assets.isEmpty() || selectedAssets.isNotEmpty(), modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).pressScaleOnPointer(), shape = RoundedCornerShape(15.dp), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)) {
-                Icon(Icons.Outlined.Download, null)
-                Spacer(Modifier.width(8.dp))
-                Text(if (assets.isNotEmpty()) "下载已选媒体（${selectedAssets.size}）" else "下载媒体")
+                } else if (hasVideoPreview) {
+                    showDownloadDialog = true
+                }
             }
+            val downloadEnabled = if (hasImageAssets) selectedAssets.isNotEmpty() else hasVideoPreview
+            if (hasSelectableAssets) {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    val allAssetsSelected = selectedAssets.size == assets.size
+                    Button(
+                        onClick = {
+                            selectedAssets = if (allAssetsSelected) emptySet() else assets.indices.toSet()
+                        },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).pressScaleOnPointer(),
+                        shape = RoundedCornerShape(15.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (allAssetsSelected) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.primaryContainer
+                            },
+                            contentColor = if (allAssetsSelected) {
+                                MaterialTheme.colorScheme.onPrimary
+                            } else {
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            }
+                        ),
+                        elevation = ButtonDefaults.buttonElevation(
+                            defaultElevation = 0.dp,
+                            pressedElevation = 2.dp
+                        )
+                    ) {
+                        Text(if (allAssetsSelected) "取消全选" else "全选媒体", fontWeight = FontWeight.SemiBold)
+                    }
+                    Button(
+                        onClick = downloadSelected,
+                        enabled = downloadEnabled,
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).pressScaleOnPointer(),
+                        shape = RoundedCornerShape(15.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Icon(Icons.Outlined.Download, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("下载已选媒体（${selectedAssets.size}）")
+                    }
+                }
+            } else {
+                Button(
+                    onClick = downloadSelected,
+                    enabled = downloadEnabled,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).pressScaleOnPointer(),
+                    shape = RoundedCornerShape(15.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Icon(Icons.Outlined.Download, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (hasImageAssets) "下载已选媒体（${selectedAssets.size}）" else "下载媒体")
+                }
+            }
+        }
+        media.caption?.takeIf(String::isNotBlank)?.let { caption ->
+            CaptionExtractionCard(caption)
         }
         media.audioUrl?.takeIf(String::isUsableMediaUrl)?.let { audioUrl ->
             AudioPreviewCard(audioUrl = audioUrl, onDownload = { onDownloadAudio(media) })
@@ -1845,7 +2006,7 @@ private fun MediaAssetCard(
             }
             .clickable(interactionSource = interactionSource, indication = null, onClick = onClick)
     ) {
-        RemoteImage(asset.thumbnailUrl, Modifier.fillMaxSize(), placeholderUrl)
+        RemoteImage(asset.thumbnailUrl ?: placeholderUrl, Modifier.fillMaxSize(), placeholderUrl)
         if (selected) {
             Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)))
             Surface(
@@ -1855,7 +2016,7 @@ private fun MediaAssetCard(
                 contentColor = MaterialTheme.colorScheme.onPrimary
             ) { Text("✓", modifier = Modifier.padding(start = 4.dp, top = 0.dp), style = MaterialTheme.typography.labelMedium) }
         }
-        if (asset.isLive) {
+        if (asset.isLive || asset.isVideo || isVideoMediaUrl(asset.option.downloadUrl)) {
             Surface(
                 modifier = Modifier.align(Alignment.BottomEnd).padding(5.dp).size(28.dp),
                 shape = CircleShape,
@@ -1874,7 +2035,8 @@ private fun RemoteImage(url: String?, modifier: Modifier = Modifier, placeholder
         }
         return
     }
-    var loading by remember(url) { mutableStateOf(true) }
+    var requestedUrl by remember(url, placeholderUrl) { mutableStateOf(url) }
+    var loading by remember(requestedUrl) { mutableStateOf(true) }
     Box(modifier = modifier.background(MaterialTheme.colorScheme.surfaceVariant)) {
         if (loading) {
             val transition = rememberInfiniteTransition(label = "image-placeholder")
@@ -1892,7 +2054,12 @@ private fun RemoteImage(url: String?, modifier: Modifier = Modifier, placeholder
         }
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)
-                .data(url)
+                .data(requestedUrl)
+                .apply {
+                    mediaRequestHeaders(requestedUrl.orEmpty()).forEach { (name, value) ->
+                        addHeader(name, value)
+                    }
+                }
                 .size(640)
                 .crossfade(180)
                 .build(),
@@ -1903,8 +2070,11 @@ private fun RemoteImage(url: String?, modifier: Modifier = Modifier, placeholder
             contentScale = androidx.compose.ui.layout.ContentScale.Crop,
             onSuccess = { loading = false },
             onError = {
-                loading = false
-                // Keep the stable surface placeholder when remote media is unavailable.
+                if (!placeholderUrl.isNullOrBlank() && requestedUrl != placeholderUrl) {
+                    requestedUrl = placeholderUrl
+                } else {
+                    loading = false
+                }
             }
         )
     }
@@ -1917,9 +2087,11 @@ private fun formatPlaybackTime(milliseconds: Int): String {
 
 @Composable
 private fun MediaDetails(media: ParsedMedia) {
+    val pixelResolution = media.downloadOptions.firstOrNull()?.pixelResolution
     val summary = listOf(
         platformDisplayName(media.platform),
         resolutionDisplayName(media.resolution),
+        pixelResolution.orEmpty(),
         formatBitRate(media.bitRate),
         mediaTypeDisplayName(media.mediaType),
         formatMediaSize(media.sizeBytes)
@@ -2240,6 +2412,11 @@ private fun DownloadProgressDialog(
                             )
                         }
                         Text(
+                            "实时速度 ${formatTransferSpeed(state.bytesPerSecond)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
                             "${state.threadCount} 个下载线程",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -2314,6 +2491,7 @@ private fun DownloadQualityDialog(
                     val interactionSource = remember(index) { MutableInteractionSource() }
                     val resolution = resolutionDisplayName(option.resolution)
                     val details = listOf(
+                        option.pixelResolution.takeUnless { it == resolution }.orEmpty(),
                         resolutionDisplayName(option.quality).takeUnless { it == resolution }.orEmpty(),
                         formatBitRate(option.bitRate),
                         formatMediaSize(option.sizeBytes).takeUnless { it == "待获取" }.orEmpty()
@@ -2747,6 +2925,83 @@ private fun HistoryScreen(
 }
 
 @Composable
+private fun CaptionExtractionCard(caption: String) {
+    val context = LocalContext.current
+    val scrollState = rememberScrollState()
+    val viewportHeight = 120.dp
+    val density = LocalDensity.current
+    val viewportHeightPx = with(density) { viewportHeight.toPx() }
+    val thumbHeightPx = if (scrollState.maxValue > 0) {
+        (viewportHeightPx * viewportHeightPx / (viewportHeightPx + scrollState.maxValue)).coerceAtLeast(with(density) { 18.dp.toPx() })
+    } else {
+        viewportHeightPx
+    }
+    val thumbOffsetPx = if (scrollState.maxValue > 0) {
+        (viewportHeightPx - thumbHeightPx) * scrollState.value / scrollState.maxValue
+    } else {
+        0f
+    }
+    GlassCard {
+        Text("文案提取", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
+        Spacer(Modifier.height(3.dp))
+        Text(
+            "点击后复制到系统剪切板",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(9.dp))
+        Box(modifier = Modifier.fillMaxWidth().height(viewportHeight)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.42f))
+                    .verticalScroll(scrollState)
+                    .clickable {
+                        context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                            ClipData.newPlainText("文案", caption)
+                        )
+                    }
+                    .padding(12.dp)
+            ) {
+                Text(
+                    text = caption,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            if (scrollState.maxValue > 0) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterEnd)
+                        .padding(vertical = 5.dp, horizontal = 4.dp)
+                        .width(3.dp)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(top = with(density) { (5.dp.toPx() + thumbOffsetPx).toDp() }, end = 4.dp)
+                        .width(3.dp)
+                        .height(with(density) { thumbHeightPx.toDp() })
+                        .pointerInput(scrollState.maxValue) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                val trackHeightPx = (viewportHeightPx - thumbHeightPx).coerceAtLeast(1f)
+                                scrollState.dispatchRawDelta(dragAmount.y / trackHeightPx * scrollState.maxValue)
+                            }
+                        }
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.72f))
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun HistoryThumbnail(entry: ParseHistoryEntry) {
     val fallbackCacheKey = remember(entry.downloadUrl) { "history:${entry.downloadUrl}" }
     var bitmap by remember(entry.coverUrl, entry.downloadUrl) {
@@ -2864,9 +3119,9 @@ private fun SettingsScreen(
                 onClick = { pageName = SettingsPage.Tutorials.name }
             )
             SettingsEntry(
-                icon = Icons.Outlined.Forum,
+                icon = Icons.Outlined.Info,
                 title = "交流反馈",
-                summary = "加入 QQ 群进行问题反馈",
+                summary = "QQ群：$FEEDBACK_QQ_GROUP",
                 onClick = { pageName = SettingsPage.Feedback.name }
             )
             SettingsEntry(
@@ -2991,43 +3246,7 @@ private fun SettingsScreen(
             } else if (page == SettingsPage.Tutorials) {
                 TutorialSupportContent()
             } else if (page == SettingsPage.Feedback) {
-                var qqCopied by rememberSaveable { mutableStateOf(false) }
-                GlassCard {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            "QQ群号：",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            QQ_GROUP_NUMBER,
-                            modifier = Modifier.clickable {
-                                context.getSystemService(ClipboardManager::class.java)
-                                    ?.setPrimaryClip(ClipData.newPlainText("QQ群号", QQ_GROUP_NUMBER))
-                                qqCopied = true
-                            },
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        if (qqCopied) {
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "已复制",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(16.dp))
-                    Text(
-                        "QQ交流群图片",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    FeedbackGroupImage()
-                }
+                FeedbackContent()
             } else if (page == SettingsPage.About) {
                 GlassCard {
                     Text("关于本 APP", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurface)
@@ -3212,6 +3431,12 @@ private val tutorialSupportItems = listOf(
 private fun TutorialSupportContent() {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text(
+            "目前已支持以下APP解析：今日头条、快手、抖音、微信视频号、即梦、豆包、哔哩哔哩、皮皮搞笑、皮皮虾、微博、最右、红果短剧、红果漫剧、好看视频、西瓜视频、全民K歌。",
+            style = MaterialTheme.typography.titleMedium,
+            color = Color.Black,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
             "支持的 APP",
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface
@@ -3247,6 +3472,29 @@ private fun TutorialSupportContent() {
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun FeedbackContent() {
+    val context = LocalContext.current
+    GlassCard {
+        Text("QQ群：$FEEDBACK_QQ_GROUP", color = Color.Black, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+        Spacer(Modifier.height(8.dp))
+        Text("点击群号即可复制到剪贴板", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Spacer(Modifier.height(12.dp))
+        Text(
+            FEEDBACK_QQ_GROUP,
+            modifier = Modifier
+                .clickable {
+                    val clipboard = context.getSystemService(ClipboardManager::class.java)
+                    clipboard?.setPrimaryClip(ClipData.newPlainText("QQ群号", FEEDBACK_QQ_GROUP))
+                }
+                .padding(vertical = 4.dp),
+            color = Color.Black,
+            fontWeight = FontWeight.Bold,
+            style = MaterialTheme.typography.headlineMedium
+        )
     }
 }
 

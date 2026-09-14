@@ -23,8 +23,8 @@ android {
         minSdk = 31
         targetSdk = 36
         // Keep this above APP/03's 1508 so the update is accepted as an upgrade.
-        versionCode = 2012
-        versionName = "2.1.2"
+        versionCode = 2016
+        versionName = "2.1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -53,8 +53,22 @@ android {
     val douyinApiKey = localProperties.getProperty("douyin.api.key", "")
         .replace("\\", "\\\\")
         .replace("\"", "\\\"")
+    val mediaParserApiKey = localProperties.getProperty(
+        "media.parser.api.key",
+        "mp-xTjZFzIS38MPakp5nwfaTo75"
+    )
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+    val mediaParserApiBase = localProperties.getProperty(
+        "media.parser.api.base",
+        "https://mxper.cc.cd/api/v1/parse"
+    )
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
     defaultConfig {
         buildConfigField("String", "DOUYIN_API_KEY", "\"$douyinApiKey\"")
+        buildConfigField("String", "MEDIA_PARSER_API_KEY", "\"$mediaParserApiKey\"")
+        buildConfigField("String", "MEDIA_PARSER_API_BASE", "\"$mediaParserApiBase\"")
     }
 }
 
